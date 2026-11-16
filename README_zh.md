@@ -40,4 +40,4 @@ git log --oneline HEAD..upstream/main      # 查看上游新提交
 git cherry-pick <commit>                   # 按需挑选合并
 ```
 
-`main` 分支跟踪上游，开发在 `dev/local` 分支上进行。
+`main` 是 TAR-Lab 开发分支；`upstream-main` 跟踪上游 `upstream/main`，更新它用 `git fetch upstream && git branch -f upstream-main upstream/main`。
