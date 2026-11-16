@@ -10,7 +10,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
-dependencies = []
+dependencies = [
+    "httpx2>=2.16,<3",
+    "mcp>=2.3,<3",
+]
+
+[project.scripts]
+tarlab = "tar_lab.cli:main"
 
 [dependency-groups]
 dev = [

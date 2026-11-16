@@ -1,6 +1,6 @@
 # TAR-Lab 架构设计
 
-状态：草案（2026-11-17）。目录骨架已建立，各模块尚未实现。
+状态：草案（2026-11-17）。已实现：`integrations/ai_scientist`（引擎适配器）、`integrations/undermind`（MCP 客户端原型）。其余模块只有目录骨架。
 
 ## 目标
 
@@ -50,6 +50,12 @@ AI-Scientist-v3 负责“给定任务 → 实验证据和论文”这一段：�
 - **输出**：运行目录（`<runs>/<task>/<agent>/<run_id>/`）中的 `best_program_manifest.json`、消融与事后分析结果、论文目录和日志。
 - **约束**：平台不导入 `src.*`。引擎有独立的环境和测试，可以深度修改，甚至整个替换，而不影响平台。
 
+适配器 `tar_lab.integrations.ai_scientist` 的接口：
+
+- `TaskSpec` + `write_task_dir()`：生成任务目录。没有 `program_0/` 的任务必须包含 `task_drafting` 阶段。
+- `AIScientistEngine.run(RunRequest)`：以子进程运行 `agsci run`。会显式传入 `run_id` 和 `paths.results_root`，所以运行目录可以预先确定；同时清除宿主机的 `PYTHONPATH`；控制台输出写入日志文件。
+- `load_run(run_dir)` / `tarlab engine summary <run_dir>`：从 `pipeline_events.jsonl`、`investigation/best_program_manifest.json`、`.investigation_completion.json`、`paper/paper.pdf` 中汇总各阶段状态、最佳程序、结局和费用。续跑时，以每个阶段最后一次的结果为准。
+
 ## Undermind 集成
 
 - **接入方式**：远程 MCP `https://mcp.undermind.ai/mcp`，Streamable HTTP，OAuth 授权码 + PKCE。
@@ -57,6 +63,16 @@ AI-Scientist-v3 负责“给定任务 → 实验证据和论文”这一段：�
 - **工具权限**：部分工具会删除数据或无法撤销，自动运行时默认只开放读取和创建类工具。
 - **平台层用途**：选题、调研、新颖性检查、寻找基线方法和数据集，结果写入 `memory`。
 - **引擎层用途（可选）**：为容器内的 Codex/Claude CLI 配置 MCP，在构思和写论文阶段使用 Undermind。代价是要把登录凭据挂载进容器。
+
+实现（`tar_lab.integrations.undermind`）：
+
+- **客户端标识**：默认使用 CIMD，客户端 ID 是 `https://xdkoala.github.io/TAR-Lab/oauth/client-metadata.json`。该文档的源文件是 `deploy/oauth/client-metadata.json`，发布在 `gh-pages` 分支。改用 Undermind 预分配的客户端 ID 时，设置 `TARLAB_UNDERMIND_CLIENT_ID`。
+- **回调地址**：`http://127.0.0.1:47615/callback`，必须和 CIMD 文档中登记的一致。
+- **凭据存储**：`~/.config/tar-lab/undermind/credentials.json`，权限 0600，原子写入。Undermind 每次刷新都会更换刷新令牌，新令牌必须立即持久化。
+- **断点恢复**：SDK 重启后既不知道令牌何时过期，也不知道令牌端点。`UndermindOAuthProvider` 会从存储中恢复过期时间，并重新发现服务器的 OAuth 元数据，这样后台任务重启后能直接刷新令牌，而不是要求重新在浏览器登录。
+- **非交互模式**：Agent 使用的默认模式，从不打开浏览器。凭据缺失或已被撤销时，抛出 `LoginRequiredError`，由编排层转为人工任务。
+- **工具权限**：`ToolPolicy` 默认拒绝。只读模式只放行标注了 `readOnlyHint` 的工具；读写模式额外放行明确标注 `destructiveHint: false` 的工具；删除类和没有标注的工具一律拒绝，除非显式加入放行列表。
+- **审计**：每次调用（包括被拒绝的调用）都追加到 `~/.config/tar-lab/undermind/audit.jsonl`。
 
 ## 模型调用
 

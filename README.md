@@ -39,6 +39,16 @@ uv run ruff check . && uv run mypy . && uv run pytest -q -n auto
 
 凭据不入库：`.env`、`engines/ai-scientist-v3/.env`、`deploy/local/env/*.env` 都已被 Git 忽略，只提交 `*.env.example` 模板。
 
+## 平台命令
+
+```bash
+uv run tarlab undermind login          # 浏览器授权 Undermind（一次性；之后自动刷新令牌）
+uv run tarlab undermind status         # 查看凭据状态（不联网）
+uv run tarlab undermind tools          # 列出工具及权限判定（默认只读）
+uv run tarlab undermind call <tool> --args '{"key": "value"}'
+uv run tarlab engine summary ../runs/circpack/codex/20261116_143042   # 汇总一次引擎运行
+```
+
 ## 同步引擎上游
 
 `upstream-main` 分支跟踪 SakanaAI 上游 `upstream/main`，代码位于仓库根目录；本仓库中对应代码位于 `engines/ai-scientist-v3/`。
