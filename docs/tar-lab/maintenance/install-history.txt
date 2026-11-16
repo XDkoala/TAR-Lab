@@ -1,0 +1,133 @@
+AI-Scientist-v3 本地安装与使用说明
+安装日期：2026-11-16（北京时间）
+
+当前状态
+源码与 Python 开发环境已经安装，可以查看代码、进行二次开发、预览流程、使用结果查看界面。
+Docker 29.1.3 和项目 Agent 镜像现已安装完成。已选择 ChatGPT Pro 订阅，通过 Codex 接入。
+最终环境检查：22 项通过、6 项可选工具警告、0 项失败。禁网容器中也能识别 ChatGPT 登录。
+这只证明本地登录文件可被读取；在线模型调用是否成功、剩余额度是否足够，仍待真实试跑确认。
+2026-11-17 更新：已补齐基准、四个方案的标准消融、后续分析与 12 页论文草稿。详见同目录 circpack-run-report.txt。
+旧版 circpack 不支持独立封闭最终评估，已另做冻结程序公开复评并明确记录限制。可选 API 论文评审未启用。
+没有调用付费模型，没有生成论文。dry-run 日志中的 completed 只代表流程预览完成。
+
+一、项目放在哪里
+/home/xd/Documents/Codex/2026-11-16/new-chat/outputs/AI-Scientist-v3
+
+官方仓库：https://github.com/SakanaAI/AI-Scientist-v3
+下载基线：df8313889a004f8a44a472e19a833cd547bb828a
+开发分支：dev/local
+基线标签：baseline/first-download
+官方远程：upstream
+尚未创建或连接你自己的 GitHub Fork，也没有向 GitHub 上传任何内容。
+
+二、已经做了什么（通俗解释）
+1. 完整下载了源码和 Git 历史，并建立独立开发分支。以后可比较修改、回退和跟踪官方更新。
+2. 用现有 Python 3.12.3 和 uv，根据项目自带 uv.lock 安装了依赖和开发工具，共 89 个包。
+   这些包装在项目自己的 .venv 中，相当于给项目准备一个独立工具箱，没有替换系统 Python。
+   项目以可编辑方式安装，修改源码后可直接使用。
+3. 从 Node.js 官网下载并核验 SHA-256，安装 Node 22.23.5 到 local-runtime/node。
+   它用于构建查看实验结果的网页，没有修改系统 Node 或 shell 启动文件。
+4. 安装并构建了项目自带的 Run Inspector 网页，验证首页与健康接口后关闭测试服务。
+5. 准备 agsci-local.sh 启动脚本，自动进入项目、选择正确 Python/Node，并隔开宿主机 ROS 的 Python 路径干扰。
+6. 创建空白 .env，权限为仅当前用户可读写；Git 已忽略此文件。没有读取或复制其他应用的模型密钥。
+7. 保留许可证和依赖锁文件。后续为跑通论文编译，修复了两处 TeX 输入路径检查并增加测试；改动在 dev/local 分支，补丁为同目录 tex-path-compatibility.patch。
+
+三、验证了什么
+- 现有 CLI、配置、dry-run 测试：128 passed。
+- circpack CPU 初始程序：correct=true（只是自带初始程序的本地评估，不是 Agent 优化实验）。
+- 六阶段流程 dry-run：退出码 0，不启动模型或 Docker。
+- 网页静态构建、HTTP 首页和 /api/healthz：通过。
+- environment-check.txt：当前缺 Docker；模型凭证尚未配置。Agent CLI 的宿主机缺失警告通常由 Docker 镜像内的工具解决。
+- 检查中发现，Codex 工具的隔离环境会影响 /tmp 权限和 GPU 探测；最终报告和流程预览已在宿主环境复核。
+
+四、还需要完成的一次性安装
+更新：本节安装现已完成，无需再次执行。保留以下内容供以后重装参考。
+打开你自己的 Ubuntu 终端，复制以下一行：
+
+bash /home/xd/Documents/Codex/2026-11-16/new-chat/outputs/setup-docker.sh
+
+这个脚本会：
+- 用 Ubuntu 软件源安装 docker.io（如已安装则跳过）。
+- 启动 Docker 服务。
+- 按项目官方 Dockerfile 构建 Agent 镜像，并验证镜像内工具。
+- 成功后将你加入 docker 组，让后续运行无需 sudo。docker 组拥有较高系统权限。
+
+sudo 提示时输入的是你电脑的管理员密码，不是模型 API 密钥；终端不显示密码字符是正常的。
+不要把密码发到聊天里。首次构建需要从多个站点下载组件，可能比较久。
+脚本尚未实际执行：当前助手终端的 sudo 需要密码，因此 Docker 安装和镜像构建结果尚未验证。
+脚本不会启动科研任务。构建失败时保留报错，再根据实际原因处理。
+如果脚本提示已加入 docker 组，请注销 Ubuntu 后重新登录，使组权限生效。
+
+五、选择订阅登录或 API
+当前选择：ChatGPT Pro 订阅 / Codex。首次试用不需要填写 API 密钥。
+启动脚本已能在旧终端中临时刷新用户已获授权的 Docker 组权限，无需为当前使用立即注销。
+仅预览一次研究循环（不调用模型）：
+bash /home/xd/Documents/Codex/2026-11-16/new-chat/outputs/try-codex-subscription.sh
+
+真实试跑一次研究循环（会消耗 Codex 可用额度）：
+bash /home/xd/Documents/Codex/2026-11-16/new-chat/outputs/try-codex-subscription.sh --run
+
+这个专用脚本选择 Codex 0.169.0、gpt-6.1-sol、Docker、HEADLESS_BILLING=subscription。
+它显式使用独立的 codex-subscription.env，不加载仓库 .env，也不转发 OPENAI_API_KEY/CODEX_API_KEY。
+使用镜像 agentic-scientist/agent-cli:codex-0.169.0；原始镜像仍保留。
+它只运行 circpack 的 investigation 阶段，max_idea_cycles=1，暂不生成论文、配图或 API 评审。
+下文保留其他接入方式作为参考。
+
+首次真实试跑修复记录：
+20261116_141647 在生成研究想法阶段失败，模型调用返回 gpt-5.5 不支持 ChatGPT 账号，退出码 78。
+脚本此前没有明确指定模型，Headless 最终调用了旧模型。这不是 Docker 安装或订阅登录失败。
+现已升级容器内 Codex，并显式指定官方当前支持的 gpt-6.1-sol。
+也修正了空 env_file 在下层自动回退到仓库 .env 的问题：改为传入单独的订阅配置文件。
+已通过 Headless → Codex → gpt-6.1-sol 进行真实最小调用，回复 OK，计费路径记录为 subscription。
+这次最小调用消耗了订阅额度，但尚未重新执行完整研究循环；使用上面的 --run 命令新建一次试跑即可。
+若日志展示 API-list-price-estimate，那是按 API 价目表推算的使用价值，不是订阅账号实际产生的 API 账单。
+不必一定购买 API。项目支持 Codex 和 Claude 的订阅凭证，具体取决于账号是否包含相应编程 Agent 权限。
+Codex 可通过 codex login 使用 ChatGPT 登录；Claude 可按官方流程提供订阅凭证。
+订阅方式会消耗账号的可用额度，并非无限运行。
+项目 docs/agent_billing.md 说明：HEADLESS_BILLING=subscription 可禁止 Headless 在订阅失败时回退到付费 API。
+默认 auto 模式在存在付费凭证时可能回退；选择订阅方案后应一起配置计费模式。
+可选最终 AI Review 仍走 OpenAI API；概念配图也可能需要额外 API。首次试用可先不启用这些功能。
+具体登录及容器凭证传递方式需要根据选择的 Agent 验证，不要把账号令牌当普通配置分享。
+
+如果选择 API：
+默认 Agent 为 Claude。用文本编辑器打开：
+/home/xd/Documents/Codex/2026-11-16/new-chat/outputs/AI-Scientist-v3/.env
+
+在 ANTHROPIC_API_KEY= 后面填入你自己的 Anthropic API 密钥并保存。
+有 Claude OAuth 令牌时也可按官方说明使用 CLAUDE_CODE_OAUTH_TOKEN；不必同时配置多种凭证。
+可选 OPENAI_API_KEY 用于概念配图和可选的论文评审，不要为初次检查一次性填写所有平台密钥。
+如果你要使用其他 Agent，需要将 agent.name 及对应凭证一起配置，而不是只更换密钥。
+密钥只填在本地文件，不要提交到 Git，也不要贴到聊天里。
+
+六、日常使用
+以下命令可以在任意目录执行，不需要手动激活虚拟环境。
+
+检查环境：
+bash /home/xd/Documents/Codex/2026-11-16/new-chat/outputs/agsci-local.sh doctor examples/circpack
+
+只预览，不花模型调用费用：
+bash /home/xd/Documents/Codex/2026-11-16/new-chat/outputs/agsci-local.sh run examples/circpack --dry-run
+
+打开结果查看界面（尚无实际实验结果时列表为空）：
+bash /home/xd/Documents/Codex/2026-11-16/new-chat/outputs/agsci-local.sh inspect start --no-build
+浏览器地址：http://127.0.0.1:8765
+终端按 Ctrl+C 停止网页服务。
+
+Docker 与凭证都准备好以后，以下命令用于默认 Claude Agent 的缩小工作量真实试跑（Codex 需增加 agent.name=codex）：
+bash /home/xd/Documents/Codex/2026-11-16/new-chat/outputs/agsci-local.sh run examples/circpack investigation.execution.max_idea_cycles=2 ablations.execution.num_replications=1 ablations.execution.max_evals_per_variant=2 posthoc.execution.max_selected_analyses=1
+
+真实试跑会调用模型，消耗订阅额度或按 API 计费，取决于配置。上述次数只减少工作量，不是硬性费用上限。
+CPU 入门任务无需 GPU，也无需预先下载大模型权重。
+实验输出位于项目 results/circpack/claude/<run_id>/，论文成功生成时位于 paper/paper.pdf。
+
+七、二次开发从哪里看
+examples/：任务说明、初始程序、评估器。建议先复制 circpack，再改成自己的任务。
+configs/：模型、实验次数、超时和阶段配置。
+src/investigation/：研究与实验迭代逻辑。
+src/pipeline/、src/orchestrator/：工作流编排。
+src/prompts/、src/agents/：提示词与 Agent 支持资源。
+tests/：已有测试。
+
+提交自己的修改前，先在项目目录运行 git status，确认没有包含密钥或实验输出。
+未来建立自己的 Fork 后，将它添加为 origin；upstream 继续保留为官方仓库。
+不要为了更新而直接覆盖当前目录。先保存自己的改动，再 git fetch upstream 并检查差异。

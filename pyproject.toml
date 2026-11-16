@@ -70,6 +70,7 @@ packages = [
     "src.posthoc_pipeline",
     "src.final_evaluation",
     "src.task_drafting",
+    "tar_lab",
 ]
 
 [tool.ruff]
@@ -96,5 +97,5 @@ exclude = "(^results/|^examples/|^src/agents/skills/write-paper-standalone/scrip
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tests"]
+testpaths = ["tests", "tests_ext"]
 norecursedirs = ["results", ".git", ".venv", "build", "dist"]

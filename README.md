@@ -1,3 +1,9 @@
+> [!NOTE]
+> **TAR-Lab fork.** This repository is TAR-Lab (Trusted Autonomous Research Lab), built on
+> [SakanaAI/AI-Scientist-v3](https://github.com/SakanaAI/AI-Scientist-v3). See
+> [README_zh.md](README_zh.md) for the fork's layout and workflow, and [NOTICE](NOTICE).
+> The rest of this README is the upstream documentation.
+
 
 <p align="center">
 <img src="docs/assets/logo.png" alt="The Agentic Scientist" width="800" />

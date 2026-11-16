@@ -1,0 +1,14 @@
+{
+  "date": "2026-11-17",
+  "repaired_environment_files": 45,
+  "removed_compatibility_links": 20,
+  "removed_cache_bytes": 684998766,
+  "historical_run_metadata": "preserved unchanged; old-run resume needs path migration",
+  "runtime_check": "direct CLI and imports passed without compatibility links",
+  "second_pass": {
+    "old_date_directory_removed": "/home/xd/Documents/Codex/2026-11-16",
+    "agent_runtime_download_font_cache_removed": true,
+    "python_bytecode_directories_removed": 14,
+    "experiment_data_and_runtime_environments": "preserved"
+  }
+}

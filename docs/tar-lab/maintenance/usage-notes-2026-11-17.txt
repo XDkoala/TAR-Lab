@@ -1,0 +1,26 @@
+当前目录：/home/xd/Desktop/Trusted-Autonomous-Research-Lab
+
+1. 查看和开发源码：
+/home/xd/Desktop/Trusted-Autonomous-Research-Lab/AI-Scientist-v3
+
+2. 查看本次论文与报告：
+/home/xd/Desktop/Trusted-Autonomous-Research-Lab/研究成果/2026-11-17_26圆装填
+
+3. 启动命令（不需要手动激活 Python 环境）：
+bash "/home/xd/Desktop/Trusted-Autonomous-Research-Lab/本地运行配置/agsci-local.sh" --help
+
+4. 流程预览（不调用模型）：
+bash "/home/xd/Desktop/Trusted-Autonomous-Research-Lab/本地运行配置/try-codex-subscription.sh"
+
+5. 真实运行（会消耗订阅额度）：
+bash "/home/xd/Desktop/Trusted-Autonomous-Research-Lab/本地运行配置/try-codex-subscription.sh" --run
+
+6. 完整环境检查：
+bash "/home/xd/Desktop/Trusted-Autonomous-Research-Lab/本地运行配置/agsci-local.sh" doctor examples/circpack agent.name=codex agent.model=gpt-6.1-sol container.image=agentic-scientist/agent-cli:codex-0.169.0-pdf "container.env_file='/home/xd/Desktop/Trusted-Autonomous-Research-Lab/本地运行配置/codex-subscription.env'"
+
+旧路径兼容链接已清除，Python 环境已改用当前真实路径。
+历史实验快照和日志保留生成时的原始绝对路径；查看请进入当前 results 目录。
+旧实验的自动续跑与索引引用需先做路径迁移，不能将归档记录当作已验证可续跑的状态。
+只完成启动和基础依赖检查；当前助手隔离环境无法连接 Docker，且 /tmp 安全检查受阻，完整运行需在宿主机复核。
+原实验与论文已完成，不必重新运行 continue-circpack.sh。
+维护记录/安装记录_历史参考.txt 包含历史过程，不代表最新状态。

@@ -82,3 +82,6 @@ outputs/
 
 # Harness-written sealed task runtime manifest (machine-specific, derived)
 .agentic_runtime.json
+
+# TAR-Lab local runtime config (commit only *.env.example templates)
+/deploy/local/env/*.env
