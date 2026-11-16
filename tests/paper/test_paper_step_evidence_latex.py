@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -487,6 +488,35 @@ RECORDER_REJECT_CASES: list[tuple[str, str, str]] = [
     ("relative_workspace_escape", "PWD {root}\nINPUT ../outside-secret.tex\n", "outside approved TeX roots"),
     ("absolute_workspace_escape", "PWD {root}\nINPUT {tmp}/outside-secret.tex\n", "outside approved TeX roots"),
 ]
+
+
+@pytest.mark.parametrize("implementation", ["host", "standalone"])
+def test_approved_tex_symlink_targets(tmp_path: Path, implementation: str) -> None:
+    module = paper_step
+    if implementation == "standalone":
+        script = Path(__file__).resolve().parents[2] / "src/agents/skills/validate-paper/scripts/validate_compile_inputs.py"
+        spec = importlib.util.spec_from_file_location("compile_inputs_under_test", script)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    first = tmp_path / "texmf"
+    second = tmp_path / "texlive"
+    first.mkdir()
+    second.mkdir()
+    allowed = second / "texmf.cnf"
+    allowed.write_text("trusted configuration")
+    alias = first / "texmf.cnf"
+    alias.symlink_to(allowed)
+    external = tmp_path / "outside-secret.tex"
+    external.write_text("private")
+    escaped = first / "escape.tex"
+    escaped.symlink_to(external)
+    external_alias = tmp_path / "unapproved-alias.tex"
+    external_alias.symlink_to(allowed)
+    with patch.object(module, "LATEX_SYSTEM_INPUT_ROOTS", (first, second)):
+        assert module._is_approved_latex_system_input(alias)
+        assert not module._is_approved_latex_system_input(escaped)
+        assert not module._is_approved_latex_system_input(external_alias)
 
 
 def test_validate_latex_recorder_inputs(tmp_path: Path) -> None:

@@ -4111,17 +4111,23 @@ def validate_latex_recorder_inputs(
 
 
 def _is_approved_latex_system_input(input_path: Path) -> bool:
+    if not any(input_path.is_relative_to(root) for root in LATEX_SYSTEM_INPUT_ROOTS):
+        return False
+    if not input_path.exists():
+        return True
+    try:
+        resolved_input = input_path.resolve(strict=True)
+    except OSError:
+        return False
+    # Debian links configuration files between its approved TeX trees.
+    # Both the original path and resolved target must remain approved.
     for system_root in LATEX_SYSTEM_INPUT_ROOTS:
-        if not input_path.is_relative_to(system_root):
-            continue
-        if not input_path.exists():
-            return True
         try:
-            resolved_input = input_path.resolve(strict=True)
             resolved_root = system_root.resolve(strict=True)
         except OSError:
-            return False
-        return resolved_input.is_relative_to(resolved_root)
+            continue
+        if resolved_input.is_relative_to(resolved_root):
+            return True
     return False
 
 
