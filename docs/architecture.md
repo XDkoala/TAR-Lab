@@ -74,6 +74,21 @@ AI-Scientist-v3 负责“给定任务 → 实验证据和论文”这一段：�
 - **工具权限**：`ToolPolicy` 默认拒绝。只读模式只放行标注了 `readOnlyHint` 的工具；读写模式额外放行明确标注 `destructiveHint: false` 的工具；删除类和没有标注的工具一律拒绝，除非显式加入放行列表。
 - **审计**：每次调用（包括被拒绝的调用）都追加到 `~/.config/tar-lab/undermind/audit.jsonl`。
 
+### 实测结果（2026-11-17）
+
+已完成真实登录（CIMD 客户端 ID 被 Undermind 接受）。服务器提供 32 个工具，工具标注齐全，默认只读策略的判定如下：
+
+- **放行（20 个，均标注只读）**：`get_orientation`、`list_workspaces`、`search_papers`、`find_papers_by_author`、`lookup_papers_by_metadata`、`get_paper_info`、`read_pdfs`、`inspect_*`、`get_deep_search_status`、`display_*` 等。
+- **拒绝，标注为破坏性**：`launch_deep_search`、`write_file`、`delete_file`、`delete_folder`、`delete_deep_search`。
+- **拒绝，名称以 `remove_` 开头**：`remove_papers_from_folder`。虽然标注为非破坏性，仍按名称规则拒绝。
+- **拒绝，非只读，加 `--allow-write` 后可放行**：`create_workspace`、`create_folder`、`move_*`、`add_papers_to_folder`、`star_papers`、`unstar_papers`。
+
+对平台设计的影响：
+
+- **深度检索需单独放行**：Undermind 的核心能力“深度检索”（`launch_deep_search`，异步运行数分钟，可同时运行的数量有限）被标注为破坏性，在读写模式下也会被拒绝。编排层需要把它作为受预算控制的动作，显式加入放行列表；结果通过 `get_deep_search_status` / `inspect_deep_searches` 轮询获取。
+- **需要专用工作区**：`search_papers`、`launch_deep_search` 等工具都需要 `workspace_id`。平台应使用专用的 TAR-Lab 工作区，或者每个研究项目各用一个工作区，不要写进用户已有的工作区。
+- **调用顺序**：按 Undermind 的说明，每个会话应先调用一次 `get_orientation`。
+
 ## 模型调用
 
 两种方式混用：
