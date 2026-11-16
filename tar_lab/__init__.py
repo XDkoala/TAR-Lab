@@ -1,5 +1,7 @@
-"""TAR-Lab extensions for the Agentic Scientist (AI-Scientist-v3).
+"""TAR-Lab: Trusted Autonomous Research Lab.
 
-Keep TAR-Lab features here rather than editing ``src/`` so upstream changes can
-be cherry-picked with few conflicts.
+The platform orchestrates multi-agent research workflows. Research engines such
+as AI-Scientist-v3 (``engines/ai-scientist-v3``) are invoked through their CLI
+and file contracts, not imported, so they can be modified or replaced
+independently.
 """

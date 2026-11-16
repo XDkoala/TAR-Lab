@@ -1,10 +1,10 @@
 TAR-Lab (Trusted Autonomous Research Lab)
 
-This project is a derivative work of The Agentic Scientist (AI-Scientist-v3)
-by Sakana AI, https://github.com/SakanaAI/AI-Scientist-v3, licensed under the
-Apache License, Version 2.0 (see LICENSE).
+engines/ai-scientist-v3/ contains The Agentic Scientist (AI-Scientist-v3) by
+Sakana AI, https://github.com/SakanaAI/AI-Scientist-v3, licensed under the
+Apache License, Version 2.0 (see engines/ai-scientist-v3/LICENSE). TAR-Lab
+changes to that directory are identifiable through the Git history and are
+listed in patches/ai-scientist-v3/.
 
-TAR-Lab modifications and additions are also distributed under the Apache
-License, Version 2.0. Files changed from upstream are identifiable through the
-Git history; TAR-Lab additions live mainly in tar_lab/, tests_ext/, deploy/,
-docs/tar-lab/ and patches/.
+All other TAR-Lab code is distributed under the Apache License, Version 2.0
+(see LICENSE).

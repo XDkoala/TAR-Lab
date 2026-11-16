@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Run agsci from this checkout with the workspace-local Node runtime and results root.
+# Run the AI-Scientist-v3 engine (agsci) with the workspace-local Node runtime and results root.
 #
 # Layout (see deploy/local/README.zh.md):
-#   <workspace>/TAR-Lab        this repository
-#   <workspace>/runs           run results (TARLAB_RUNS_DIR overrides)
+#   <workspace>/TAR-Lab                          this repository
+#   <workspace>/TAR-Lab/engines/ai-scientist-v3  engine checkout with its own .venv
+#   <workspace>/runs                             run results (TARLAB_RUNS_DIR overrides)
 #   <workspace>/.tools/node    optional local Node.js (TARLAB_NODE_DIR overrides)
 set -euo pipefail
 local_bundle_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
 local_repo_dir="$(cd -- "$local_bundle_dir/../.." && pwd)"
+local_engine_dir="$local_repo_dir/engines/ai-scientist-v3"
 local_workspace_dir="$(cd -- "$local_repo_dir/.." && pwd)"
 runs_dir="${TARLAB_RUNS_DIR:-$local_workspace_dir/runs}"
 node_dir="${TARLAB_NODE_DIR:-$local_workspace_dir/.tools/node}"
@@ -23,10 +25,10 @@ fi
 if [[ -x "$node_dir/bin/node" ]]; then
   export PATH="$node_dir/bin:$PATH"
 fi
-export PATH="$local_repo_dir/.venv/bin:$PATH"
+export PATH="$local_engine_dir/.venv/bin:$PATH"
 # The host ROS installation exports Python paths for a different interpreter.
 unset PYTHONPATH PYTHONHOME
-cd "$local_repo_dir"
+cd "$local_engine_dir"
 # Keep results outside the repository unless the caller chose a location.
 extra=()
 case "${1:-}" in
@@ -42,4 +44,4 @@ case "${1:-}" in
     fi
     ;;
 esac
-exec "$local_repo_dir/.venv/bin/agsci" "$@" "${extra[@]}"
+exec "$local_engine_dir/.venv/bin/agsci" "$@" "${extra[@]}"

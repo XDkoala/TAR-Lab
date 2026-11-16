@@ -44,7 +44,7 @@ circpack 后续消融阶段生成的插桩副本在评估器调用 solution() �
 ### 已做处理与边界
 
 安装 poppler-utils，并写入本地扩展镜像构建文件：
-[codex.Dockerfile](../../deploy/local/docker/codex.Dockerfile)。可复用镜像标签为 agentic-scientist/agent-cli:codex-0.169.0-pdf。论文随后成功编译并完成检查。
+[codex.Dockerfile](../deploy/local/docker/codex.Dockerfile)。可复用镜像标签为 agentic-scientist/agent-cli:codex-0.169.0-pdf。论文随后成功编译并完成检查。
 
 修复作用于本地扩展镜像，不能据此称官方基础镜像已修复。该 Dockerfile 的基础镜像仍使用 latest，不能保证未来重新构建完全一致。
 
@@ -64,11 +64,11 @@ Debian 将 /usr/share/texmf/web2c/texmf.cnf 链接至 /usr/share/texlive/texmf-d
 
 涉及项目文件：
 
-- src/orchestrator/paper_step.py
-- src/agents/skills/validate-paper/scripts/validate_compile_inputs.py
-- tests/paper/test_paper_step_evidence_latex.py
+- engines/ai-scientist-v3/src/orchestrator/paper_step.py
+- engines/ai-scientist-v3/src/agents/skills/validate-paper/scripts/validate_compile_inputs.py
+- engines/ai-scientist-v3/tests/paper/test_paper_step_evidence_latex.py
 
-补丁保存在 [FIX-003-tex-path-compatibility.patch](../../patches/upstream/FIX-003-tex-path-compatibility.patch)，已作为提交 e70c595 应用，请勿重复应用。已补测试覆盖跨允许目录链接、链接到外部文件、从未批准位置链接到允许文件。相关测试 13 项通过；当时完整测试结果为 2207 passed、1 skipped，Ruff 和 Mypy 通过。这些是此前修复的验证记录，本次建档没有重新运行测试。
+补丁保存在 [FIX-003-tex-path-compatibility.patch](../patches/ai-scientist-v3/FIX-003-tex-path-compatibility.patch)，已作为提交 e70c595 应用，请勿重复应用。已补测试覆盖跨允许目录链接、链接到外部文件、从未批准位置链接到允许文件。相关测试 13 项通过；当时完整测试结果为 2207 passed、1 skipped，Ruff 和 Mypy 通过。这些是此前修复的验证记录，本次建档没有重新运行测试。
 
 ### 后续维护
 
@@ -96,8 +96,8 @@ Debian 将 /usr/share/texmf/web2c/texmf.cnf 链接至 /usr/share/texlive/texmf-d
 
 ## 依据与交接
 
-- [本次运行报告](../../../deliverables/2026-11-17_circpack26/report/circpack-run-report.txt)（仓库外，仅本地可用）
+- [本次运行报告](../../deliverables/2026-11-17_circpack26/report/circpack-run-report.txt)（仓库外，仅本地可用）
 - [交给其他 agent 的提示词](maintenance/fix-task-prompt-2026-11-17.txt)
-- [原运行证据](../../../runs/circpack/codex/20261116_143042/)（仓库外，仅本地可用）
+- [原运行证据](../../runs/circpack/codex/20261116_143042/)（仓库外，仅本地可用）
 
 交接人员应先检查当前工作区及已有改动，不要默认以上历史状态就是交接时的最新状态。
