@@ -21,6 +21,7 @@ from mcp.shared.auth import (
 )
 from pydantic import AnyUrl, ValidationError
 
+from .http import make_http_client
 from .settings import UndermindSettings
 from .storage import FileTokenStorage
 
@@ -148,7 +149,9 @@ class UndermindOAuthProvider(OAuthClientProvider):
         parsed = urlparse(self._settings.server_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         prm_url = f"{origin}/.well-known/oauth-protected-resource{parsed.path.rstrip('/')}"
-        async with httpx2.AsyncClient(timeout=30, transport=self._discovery_transport) as http:
+        async with make_http_client(
+            prm_url, timeout=30, transport=self._discovery_transport
+        ) as http:
             try:
                 prm = ProtectedResourceMetadata.model_validate_json((await http.get(prm_url)).content)
                 issuer = str(prm.authorization_servers[0]).rstrip("/")

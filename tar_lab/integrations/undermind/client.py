@@ -17,6 +17,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, Tool
 
 from .auth import LoginRequiredError, UndermindOAuthProvider
+from .http import make_http_client
 from .policy import ToolDecision, ToolPolicy
 from .settings import UndermindSettings
 from .storage import FileTokenStorage
@@ -77,7 +78,9 @@ class UndermindClient:
                 self.settings, storage, interactive=self._interactive,
                 open_browser=self._open_browser,
             )
-            self._http = httpx2.AsyncClient(auth=auth, timeout=httpx2.Timeout(30, read=300))
+            self._http = make_http_client(
+                self.settings.server_url, auth=auth, timeout=httpx2.Timeout(30, read=300)
+            )
             client = Client(streamable_http_client(self.settings.server_url, http_client=self._http))
         try:
             self._client = await client.__aenter__()

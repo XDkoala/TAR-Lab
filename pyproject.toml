@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 dependencies = [
-    "httpx2>=2.16,<3",
+    "httpx2[socks]>=2.16,<3",
     "mcp>=2.3,<3",
 ]
 

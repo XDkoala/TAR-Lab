@@ -219,3 +219,40 @@ def test_client_unwraps_login_required(tmp_path: Path) -> None:
                 pass
 
     anyio.run(scenario)
+
+
+_PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
+               "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, None),
+        ({"all_proxy": "socks://127.0.0.1:7897/"}, "socks5h://127.0.0.1:7897/"),
+        ({"all_proxy": "socks://127.0.0.1:7897/", "https_proxy": "http://127.0.0.1:7897/"},
+         "http://127.0.0.1:7897/"),
+        ({"https_proxy": "127.0.0.1:8080"}, "http://127.0.0.1:8080"),
+        ({"all_proxy": "socks://127.0.0.1:7897/", "no_proxy": "undermind.ai"}, None),
+    ],
+)
+def test_proxy_resolution(monkeypatch: pytest.MonkeyPatch, env: dict[str, str],
+                          expected: str | None) -> None:
+    from tar_lab.integrations.undermind.http import make_http_client, proxy_for
+
+    for name in _PROXY_VARS:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert proxy_for(SERVER) == expected
+    anyio.run(make_http_client(SERVER).aclose)
+
+
+def test_unsupported_proxy_scheme_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tar_lab.integrations.undermind.http import proxy_for
+
+    for name in _PROXY_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("all_proxy", "socks4://127.0.0.1:1080")
+    with pytest.raises(ValueError, match="unsupported proxy scheme"):
+        proxy_for(SERVER)
