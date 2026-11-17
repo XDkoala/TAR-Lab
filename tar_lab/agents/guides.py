@@ -41,6 +41,10 @@ GUIDES: dict[str, str] = {
   the system Python), code in `code/`, outputs in `results/<experiment>/` with `config.json`,
   `metrics.json`, the seed, and a log. Record reused code with repo, commit, and license in
   `SOURCES.md`.
+- Snapshots: before every attempt the workspace is committed to git, except `.venv/`,
+  `.cache/` and files over 10 MB (datasets, wheels, checkpoints). Those are not recoverable
+  from snapshots, so record where each one came from (URL, version, checksum) and the command
+  that rebuilds it.
 - GPU: an RTX 5060 Laptop (Blackwell, 8 GB). Use PyTorch wheels built for CUDA 12.8 or newer;
   older wheels fail on this GPU. Record `torch.cuda.max_memory_allocated()` and wall time in
   every `metrics.json`. Keep each run under 15 minutes and 6 GB; if a run would exceed

@@ -295,3 +295,48 @@ def test_cancel_pending_and_terminal(tmp_path: Path) -> None:
     states = kernel.ledger.orders()
     assert states["wo-1"].status == "done" and states["wo-2"].status == "cancelled"
     assert not kernel.cancel("wo-1", "too late") and not kernel.cancel("missing", "x")
+
+
+def _git(ws: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(ws), *args], check=True, capture_output=True,
+                          text=True).stdout
+
+
+def test_snapshot_skips_environments_caches_and_large_files(tmp_path: Path) -> None:
+    from tar_lab.orchestration import kernel as kernel_module
+
+    ex = FakeExecutor([WorkResult("done", "ok"), WorkResult("done", "ok")])
+    kernel = make_kernel(tmp_path, ex)
+    ws = kernel.project.workspace
+    (ws / "code").mkdir()
+    (ws / "code" / "run.py").write_text("print(1)\n")
+    (ws / "weird name #1.txt").write_text("small\n")
+    for d in (".venv/lib", ".cache/uv", "code/__pycache__"):
+        (ws / d).mkdir(parents=True)
+        (ws / d / "f.bin").write_bytes(b"x" * 100)
+    big = ws / "assets" / "data [v1].h5"
+    big.parent.mkdir()
+    big.write_bytes(b"\0" * (kernel_module.SNAPSHOT_MAX_FILE_BYTES + 1))
+    grows = ws / "results" / "log.txt"  # tracked while small, then grows past the limit
+    grows.parent.mkdir()
+    grows.write_text("start\n")
+    _git(ws, "add", "-A")
+    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "before")
+    grows.write_bytes(b"y" * (kernel_module.SNAPSHOT_MAX_FILE_BYTES + 1))
+
+    kernel.submit(order())
+    kernel.run_pending()
+    tracked = set(_git(ws, "ls-tree", "-r", "--name-only", "HEAD").split("\n")) - {""}
+    assert tracked == {"code/run.py", "weird name #1.txt"}
+    assert big.exists() and grows.exists()  # skipped, never deleted
+    started = next(e for e in kernel.ledger.events("wo-1") if e.kind == "order.started")
+    excluded = started.payload["snapshot_excluded"]
+    assert excluded["dirs"] == [".cache", ".venv", "code/__pycache__"]
+    assert excluded["large_files"] == 2 and {f["path"] for f in excluded["largest"]} == {
+        "assets/data [v1].h5", "results/log.txt"}
+
+    big.unlink()  # a file that shrinks or disappears drops out of the exclude list
+    kernel.submit(order("wo-2"))
+    kernel.run_pending()
+    exclude = (ws / ".git" / "info" / "exclude").read_text()
+    assert exclude.count("tar-lab snapshot excludes") == 2 and "data" not in exclude

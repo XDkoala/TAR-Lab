@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -25,6 +26,66 @@ ATTENTION = frozenset({"order.finished", "order.half_time", "order.over_budget"}
 AttentionHook = Callable[[str, OrderState], None]
 McpHook = Callable[[WorkOrder], Mapping[str, McpServer]]
 _GIT_ID = ("-c", "user.name=TAR-Lab", "-c", "user.email=tar-lab@localhost")
+# Snapshots track what agents write by hand (code, configs, reports, small results). Rebuildable
+# environments and caches, and large files such as datasets, wheels and checkpoints, would make
+# every snapshot copy gigabytes into git; they are listed in the ledger instead.
+SNAPSHOT_SKIP_DIRS = frozenset({".git", ".venv", "venv", ".cache", "__pycache__", "node_modules",
+                                ".mypy_cache", ".pytest_cache", ".ruff_cache",
+                                ".ipynb_checkpoints"})
+SNAPSHOT_MAX_FILE_BYTES = 10 * 1024 * 1024
+_EXCLUDE_BEGIN, _EXCLUDE_END = "# >>> tar-lab snapshot excludes", "# <<< tar-lab snapshot excludes"
+
+
+@dataclass(frozen=True)
+class SnapshotExcludes:
+    dirs: tuple[str, ...]
+    large_files: tuple[tuple[str, int], ...]  # (path relative to the workspace, bytes)
+
+    def summary(self) -> dict[str, Any]:
+        biggest = sorted(self.large_files, key=lambda f: -f[1])[:20]
+        return {"dirs": list(self.dirs), "large_files": len(self.large_files),
+                "large_bytes": sum(b for _, b in self.large_files),
+                "largest": [{"path": p, "bytes": b} for p, b in biggest],
+                "max_file_bytes": SNAPSHOT_MAX_FILE_BYTES}
+
+
+def snapshot_excludes(workspace: Path) -> SnapshotExcludes:
+    """Find what the snapshot skips, by file size only (no file is read)."""
+    dirs, large = [], []
+    for top, subdirs, files in os.walk(workspace):
+        rel_top = Path(top).relative_to(workspace)
+        for d in list(subdirs):
+            if d in SNAPSHOT_SKIP_DIRS:
+                subdirs.remove(d)
+                if d != ".git":
+                    dirs.append((rel_top / d).as_posix())
+        for f in files:
+            path = Path(top) / f
+            try:
+                size = path.lstat().st_size
+            except OSError:
+                continue
+            if size > SNAPSHOT_MAX_FILE_BYTES and not path.is_symlink():
+                large.append(((rel_top / f).as_posix(), size))
+    return SnapshotExcludes(tuple(sorted(dirs)), tuple(sorted(large)))
+
+
+def _glob_escape(path: str) -> str:
+    return "".join("\\" + c if c in "*?[]\\!# " else c for c in path)
+
+
+def _write_excludes(workspace: Path, ex: SnapshotExcludes) -> None:
+    info = workspace / ".git" / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    path = info / "exclude"
+    text = path.read_text() if path.exists() else ""
+    if _EXCLUDE_BEGIN in text:
+        head, _, rest = text.partition(_EXCLUDE_BEGIN)
+        text = head + rest.partition(_EXCLUDE_END)[2].lstrip("\n")
+    names = sorted(SNAPSHOT_SKIP_DIRS - {".git"})
+    lines = [_EXCLUDE_BEGIN, *(f"{n}/" for n in names),
+             *("/" + _glob_escape(p) for p, _ in ex.large_files), _EXCLUDE_END]
+    path.write_text(text.rstrip("\n") + ("\n" if text.strip() else "") + "\n".join(lines) + "\n")
 
 
 @dataclass
@@ -147,8 +208,9 @@ class Kernel:
             resume = (state.session_id if state.status == "interrupted"
                       and executor.supports_resume else None)
             number = state.attempts + 1
+            snapshot, excluded = self._snapshot(order.id, number)
             self.ledger.append("order.started", order.id, {
-                "attempt": number, "snapshot": self._snapshot(order.id, number),
+                "attempt": number, "snapshot": snapshot, "snapshot_excluded": excluded,
                 "resume_session": resume, "timeout": round(remaining, 1)})
             attempt = Attempt(order, number, self.project.workspace,
                               self.project.attempt_dir(order.id, number), remaining, resume,
@@ -191,12 +253,21 @@ class Kernel:
         if kind in ATTENTION:
             self.on_attention(kind, self.ledger.orders()[order_id])
 
-    def _snapshot(self, order_id: str, attempt: int) -> str:
-        """Commit the workspace so every attempt can be diffed or reverted."""
+    def _snapshot(self, order_id: str, attempt: int) -> tuple[str, dict[str, Any]]:
+        """Commit the workspace so every attempt can be diffed or reverted; large files and
+        rebuildable directories are skipped and reported instead."""
         ws = str(self.project.workspace)
+        ex = snapshot_excludes(self.project.workspace)
+        _write_excludes(self.project.workspace, ex)
+        if ex.large_files or ex.dirs:
+            # Anything tracked before it became skipped stays on disk but leaves the snapshot.
+            subprocess.run(["git", "--literal-pathspecs", "-C", ws, "rm", "-r", "-q", "--cached",
+                            "--ignore-unmatch", "--", *ex.dirs, *(p for p, _ in ex.large_files)],
+                           check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "-C", ws, "add", "-A"], check=True)
         subprocess.run(["git", *_GIT_ID, "-C", ws, "commit", "-q", "--allow-empty",
                         "--no-verify", "-m", f"tar-lab: before {order_id} attempt {attempt}"],
                        check=True)
-        return subprocess.run(["git", "-C", ws, "rev-parse", "HEAD"], check=True,
+        head = subprocess.run(["git", "-C", ws, "rev-parse", "HEAD"], check=True,
                               capture_output=True, text=True).stdout.strip()
+        return head, ex.summary()
