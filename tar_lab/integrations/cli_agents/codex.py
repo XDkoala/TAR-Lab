@@ -36,8 +36,14 @@ def _base_flags(model: str, effort: str) -> list[str]:
     return flags
 
 
+# Where the ChatGPT desktop app ships its Codex CLI when it is not on PATH.
+BUNDLED_CODEX = Path("/usr/lib/chatgpt/resources/codex")
+
+
 def find_codex() -> str:
     found = os.environ.get("TARLAB_CODEX_BIN") or shutil.which("codex")
+    if not found and os.access(BUNDLED_CODEX, os.X_OK):
+        found = str(BUNDLED_CODEX)
     if not found:
         raise FileNotFoundError("codex CLI not found; set TARLAB_CODEX_BIN")
     return found
