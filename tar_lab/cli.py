@@ -184,11 +184,33 @@ def _show_charter(charter: Charter) -> None:
           f"constraints: {charter.constraints}\nrisks: {charter.risk_notes}")
 
 
+def _init_project(root: Path) -> None:
+    project = Project(root)
+    project.init()
+    Ledger(project.ledger_path).close()
+
+
+def _undermind_workspace(lab: Lab, charter: Charter) -> None:
+    try:
+        ws = anyio.run(create_project_workspace, lab.ledger, f"TAR-Lab: {charter.title}")
+        print(f"Undermind workspace: {ws}")
+    except (LoginRequiredError, RuntimeError) as exc:
+        print(f"Warning: no Undermind workspace ({exc}); literature tools are disabled. "
+              "Run `tarlab undermind login`, then `tarlab undermind workspace` for this "
+              "project.", file=sys.stderr)
+
+
+def _tui(project: Path | None) -> int:
+    from .tui.launch import main as tui_main
+
+    models = {name: str(getattr(ex, "model", name)) for name, ex in _executors().items()}
+    return tui_main(project, lab_for=_lab, models=models, main_model=CodexExecutor().model,
+                    init=_init_project, after_charter=_undermind_workspace)
+
+
 def _lab_command(args: argparse.Namespace) -> int:
     if args.group == "new":
-        project = Project(args.project)
-        project.init()
-        Ledger(project.ledger_path).close()
+        _init_project(args.project)
         lab = _lab(args.project)
 
         def confirm(charter: Charter) -> bool:
@@ -201,13 +223,7 @@ def _lab_command(args: argparse.Namespace) -> int:
         if charter is None:
             print("Not started; run `tarlab new` again to redo the intake.")
             return 1
-        try:
-            ws = anyio.run(create_project_workspace, lab.ledger, f"TAR-Lab: {charter.title}")
-            print(f"Undermind workspace: {ws}")
-        except (LoginRequiredError, RuntimeError) as exc:
-            print(f"Warning: no Undermind workspace ({exc}); literature tools are disabled. "
-                  "Run `tarlab undermind login`, then `tarlab undermind workspace` for this "
-                  "project.", file=sys.stderr)
+        _undermind_workspace(lab, charter)
         print(f"\nProject ready. Run: tarlab run {args.project}")
         return 0
     lab = _lab(args.project)
@@ -295,6 +311,8 @@ def _order_command(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tarlab", description="TAR-Lab research platform")
     groups = parser.add_subparsers(dest="group", required=True)
+    groups.add_parser("ui", help="interactive session (default when no command is given)"
+                      ).add_argument("project", type=Path, nargs="?")
 
     um = groups.add_parser("undermind", help="Undermind MCP connection").add_subparsers(
         dest="command", required=True)
@@ -384,7 +402,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    commands = next(a for a in parser._actions
+                    if isinstance(a, argparse._SubParsersAction)).choices
+    if not argv or (argv[0] not in commands and not argv[0].startswith("-")):
+        argv = ["ui", *argv]
+    args = parser.parse_args(argv)
+    if args.group == "ui":
+        return _tui(args.project)
     # The SDK logs a traceback for every failed OAuth flow; the CLI reports the error itself.
     logging.getLogger("mcp.client.auth").setLevel(logging.CRITICAL)
     if args.group == "engine":
@@ -392,9 +418,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _engine_compare(args.run_dirs)
         return _engine_summary(args.run_dir)
     if args.group == "project":
-        project = Project(args.project)
-        project.init()
-        Ledger(project.ledger_path).close()
+        _init_project(args.project)
         print(f"Project ready: {args.project}")
         return 0
     if args.group == "order":

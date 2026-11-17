@@ -1,0 +1,9 @@
+# Notes for coding agents
+
+- Checks: `env -u PYTHONPATH .venv/bin/ruff check . && env -u PYTHONPATH .venv/bin/mypy tar_lab tests && env -u PYTHONPATH .venv/bin/pytest -q`.
+  This machine's shell exports a ROS `PYTHONPATH` whose pytest plugins break the suite; always clear it.
+- A project may be running (`tarlab run`) while you work. Its Undermind proxy is started fresh per order as
+  `python -m tar_lab.cli undermind serve`, so `tar_lab/cli.py` must stay importable at all times; import optional
+  subsystems (e.g. `tar_lab.tui`) lazily.
+- Never modify `engines/ai-scientist-v3-original`; it must stay byte-identical to upstream.
+- New dependencies: versions released at least 7 days ago (`[tool.uv] exclude-newer` enforces this).

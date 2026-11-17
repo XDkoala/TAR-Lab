@@ -39,6 +39,24 @@ uv run ruff check . && uv run mypy . && uv run pytest -q -n auto
 
 凭据不入库：`.env`、`engines/ai-scientist-v3/.env`、`deploy/local/env/*.env` 都已被 Git 忽略，只提交 `*.env.example` 模板。
 
+## 交互界面
+
+```bash
+tarlab                      # 选择或新建项目，进入对话界面
+tarlab projects/<项目>      # 直接打开某个项目
+```
+
+界面风格参照 Claude Code：消息、工单结果和审批写进终端自己的滚动记录；底部常驻子 Agent 面板、输入行和状态栏（阶段、按 API 标价估算的花费、时间、深度检索次数、GPU）。界面只读账本、写入用户事件，不负责运行项目；关掉界面，后台的 `tarlab run` 照常运行。输入 `/help` 查看全部命令。
+
+| 按键 | 作用 |
+|---|---|
+| Enter | 发给主 Agent（当前工单完成后读到） |
+| Esc，或消息末尾加 `!` | 紧急发送，立刻叫醒主 Agent |
+| Ctrl+A | 回答待审批的问题（方向键选择） |
+| Ctrl+O | 展开/收起子 Agent 的最近步骤 |
+| Ctrl+J，或 `\` + Enter | 换行 |
+| `/` 和 `@` | 补全命令、工单号、报告和工作区文件 |
+
 ## 平台命令
 
 ```bash
