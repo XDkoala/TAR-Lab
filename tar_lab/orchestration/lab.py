@@ -33,6 +33,8 @@ MAX_ORDER_MINUTES = 90.0
 MAX_IDLE_WAKES = 3
 MAX_DECISION_ERRORS = 3
 LITERATURE_ALERT_HOURS = 6.0
+FINISH_YES = "确认结束项目"
+FINISH_NO = "不结束，继续工作（请写明方向）"
 
 
 def _now() -> datetime:
@@ -50,6 +52,8 @@ class Lab:
     # Run work orders on a background thread so messages, timers and cancellations are
     # handled while an order runs. Tests use the synchronous mode.
     threaded: bool = True
+    # Ending a project is the user's decision: ``finish`` becomes a confirmation question.
+    confirm_finish: bool = True
     _worker: threading.Thread | None = field(default=None, init=False, repr=False)
     _recovered: bool = field(default=False, init=False, repr=False)
 
@@ -158,13 +162,14 @@ class Lab:
         if not busy and not self._recovered:
             self.kernel.recover()  # only orders left by a previous, dead loop
             self._recovered = True
+        # Timers first: a timeout default that confirms finishing is applied in the same step.
+        if self._timers(charter) == "suspended":
+            return "suspended"
         decisions = self._events("pi.decision")
         if decisions:
             self._apply(decisions[-1], charter)
             if (status := self.status()) is not None:
                 return status
-        if self._timers(charter) == "suspended":
-            return "suspended"
         self._check_deadline(charter)
         self._literature_alerts(charter)
         if busy:
@@ -216,7 +221,7 @@ class Lab:
 
     def _needs_decision(self) -> bool:
         since = self._last_seq("pi.decision")
-        return any(e.seq > since for e in self._events(*WAKE))
+        return any(e.seq > since and not _confirms_finish(e) for e in self._events(*WAKE))
 
     def _urgent(self) -> bool:
         """A failed order since the last decision preempts the rest of the queue."""
@@ -317,7 +322,8 @@ class Lab:
             self._apply_once(ev.seq, decision, charter)
             charter = self.charter() or charter
         if decision.finish:
-            if not self._events("project.finished"):
+            if self._finish_confirmed(ev.seq, decision, charter) \
+                    and not self._events("project.finished"):
                 self.ledger.append("project.finished", None, {"summary": decision.final_summary})
                 self._notify(f"Project finished: {charter.title}",
                                      decision.final_summary)
@@ -345,6 +351,23 @@ class Lab:
             self.ledger.append("user.question", None, payload)
             subject = "Approval needed" if q["kind"] == "approval" else "Question"
             self._notify(f"{subject}: {charter.title}", question_text(qid, payload))
+
+    def _finish_confirmed(self, seq: int, decision: Decision, charter: Charter) -> bool:
+        """Ask once per finishing decision; only an explicit yes (or a timeout default that
+        is yes) ends the project. Any other answer wakes the main agent to continue."""
+        if not self.confirm_finish:
+            return True
+        qid = f"q{seq}-finish"
+        if not any(e.payload["qid"] == qid for e in self._events("user.question")):
+            payload = {"qid": qid, "kind": "approval", "purpose": "finish",
+                       "text": f"主 Agent 提议结束项目。\n\n{decision.final_summary}\n\n"
+                               "要结束吗？不结束的话，请写明希望继续做什么。",
+                       "options": [FINISH_YES, FINISH_NO], "default": FINISH_YES}
+            self.ledger.append("user.question", None, payload)
+            self._notify(f"Approval needed: finish {charter.title}?", question_text(qid, payload))
+            return False
+        reply = next((e for e in self._events("user.reply") if e.payload["qid"] == qid), None)
+        return reply is not None and reply.payload["answer"].strip() == FINISH_YES
 
     def _apply_once(self, seq: int, decision: Decision, charter: Charter) -> None:
         """Side effects that must happen once per decision, marked by ``decision_seq``."""
@@ -459,6 +482,11 @@ def _change_charter(charter: Charter, changes: Sequence[Mapping[str, str]]
         except ValueError:
             rejected.append({"field": name, "value": value})
     return Charter.from_dict(data), rejected
+
+
+def _confirms_finish(e: Event) -> bool:
+    return (e.kind == "user.reply" and str(e.payload.get("qid", "")).endswith("-finish")
+            and str(e.payload.get("answer", "")).strip() == FINISH_YES)
 
 
 def _brief(payload: Mapping[str, Any]) -> Any:

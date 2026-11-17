@@ -72,7 +72,7 @@ class Clock:
 
 def make_lab(tmp_path: Path, model: FakeModel, results: list[WorkResult] | None = None,
              clock: Callable[[], datetime] | None = None, executor: Any = None,
-             threaded: bool = False) -> tuple[Lab, list[str]]:
+             threaded: bool = False, confirm_finish: bool = False) -> tuple[Lab, list[str]]:
     project = Project(tmp_path / "proj")
     project.init()
     executor = executor or FakeExecutor(results or [])
@@ -84,7 +84,8 @@ def make_lab(tmp_path: Path, model: FakeModel, results: list[WorkResult] | None 
             sent.append(subject)
 
     lab = Lab(kernel, MainAgent(model, project.root), Notes(),
-              {"high": "fake", "medium": "fake", "low": "fake"}, clock or Clock(), threaded)
+              {"high": "fake", "medium": "fake", "low": "fake"}, clock or Clock(), threaded,
+              confirm_finish=confirm_finish)
     lab.start("write a world model paper", ask=lambda q: "", confirm=lambda c: True)
     return lab, sent
 
@@ -328,3 +329,34 @@ def test_undermind_trouble_is_notified_once_and_given_to_the_main_agent(tmp_path
     notices = lab._events("lab.literature_notice")
     assert [n.payload["silent"] for n in notices] == [False, True, False]
     assert "## Literature tools" in model.prompts[-1] and "unavailable" in model.prompts[-1]
+
+
+def test_finish_needs_the_users_confirmation(tmp_path: Path) -> None:
+    from tar_lab.orchestration.lab import FINISH_NO, FINISH_YES
+
+    model = FakeModel([decision(finish=True), decision(finish=True)])
+    lab, sent = make_lab(tmp_path, model, confirm_finish=True)
+    lab.step()
+    assert lab.step() == "waiting" and lab.status() is None  # asked, not finished
+    [(qid, q)] = lab.questions().items()
+    assert qid.endswith("-finish") and q.payload["options"] == [FINISH_YES, FINISH_NO]
+    assert "all done" in q.payload["text"] and any(s.startswith("Approval needed") for s in sent)
+
+    lab.reply(qid, "不要结束，再找两个新方向")  # anything but yes: the main agent continues
+    lab.step()
+    assert lab.step() == "waiting" and lab.status() is None
+    assert "再找两个新方向" in model.prompts[-1]
+    [(qid2, _)] = lab.questions().items()  # it proposed finishing again, asked again
+    assert qid2 != qid
+    lab.reply(qid2, FINISH_YES)
+    assert lab.step() == "finished"
+    assert lab._events("project.finished")[0].payload["summary"] == "all done"
+
+
+def test_finish_question_times_out_to_the_charter_default(tmp_path: Path) -> None:
+    clock = Clock()
+    lab, _ = make_lab(tmp_path, FakeModel([decision(finish=True)]), clock=clock,
+                      confirm_finish=True)
+    lab.step()
+    clock.offset = timedelta(hours=73)  # CHARTER: on_timeout "default", default is "yes"
+    assert lab.step() == "finished"

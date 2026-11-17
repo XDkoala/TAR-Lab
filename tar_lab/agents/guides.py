@@ -30,6 +30,11 @@ GUIDES: dict[str, str] = {
   code each part is adapted from; baselines (with repos and licenses); environment or
   dataset; metrics; ablations; compute estimate; main risks; what result would count as
   success or failure.
+- Treatment check, for every comparison the claim rests on: write down what concretely
+  differs between the arms when they run (which configuration, which code path, which inputs)
+  and walk the selection or matching rule through on real or estimated numbers. If the arms
+  can end up running the same thing, or the difference exists only as a label, the design is
+  invalid: say so and redesign instead of adding statistics.
 - For an experiment plan, list every run: purpose, config, seeds (at least 3 where
   feasible), expected wall time and peak GPU memory, and the output path under `results/`.
 - Respect the hardware: each training run must finish within 15 minutes and stay below
@@ -71,9 +76,13 @@ GUIDES: dict[str, str] = {
   `paper/build.log` on failure).
 {_EVIDENCE}""",
     "reviewer": f"""\
-- Topic review: for each candidate rate novelty, value to the field, feasibility within the
-  charter, and risk (1-10 each), check the closest prior work yourself, and recommend one
-  candidate or none. Write `reports/topic_review.md`.
+- Topic review: first try to break each candidate. List at least three concrete ways its
+  main comparison could turn out vacuous or confounded (e.g. both arms select the same
+  configuration, the manipulated variable never changes what runs, the metric cannot move)
+  and check each against the design and any design-check result; a design that fails here
+  is rejected however careful its statistics are. Then rate novelty, value to the field,
+  feasibility within the charter, and risk (1-10 each), check the closest prior work
+  yourself, and recommend one candidate or none. Write `reports/topic_review.md`.
 - Paper review: review as a reviewer for the charter's target venue: summary, strengths,
   weaknesses, major and minor issues, questions, and an overall score (1-10) with the
   venue's usual meaning. Check that numbers match `results/` and that citations exist.

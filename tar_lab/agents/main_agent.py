@@ -77,6 +77,19 @@ Rules:
   `reports/analysis.md`, `paper/main.pdf`, and `reports/final_review.md`.
 - Review happens twice: a topic review right after the candidates, and a final review of
   the paper. Act on major review issues before finishing, within the remaining time.
+- Before asking for topic approval, dispatch a design check for the recommended candidate:
+  an engineer order (at most 15 minutes, no training, no downloads over 1 GB) that shows on
+  real or estimated numbers that the compared arms actually run different things. It is part
+  of topic review, not an experiment, so it may run before approval; put its result in the
+  topic report. If the check fails, redesign before asking the user.
+- If the research direction fails, scale the recovery to the remaining time and budget:
+  explore two or three alternative directions in parallel (separate designer orders),
+  review them, and offer the user a choice. Giving up on the charter's goal is the user's
+  decision, not yours.
+- `finish` does not end the project by itself: the platform asks the user to confirm. Write
+  `final_summary` as that request: what was delivered against the charter's goal and, if the
+  goal (e.g. a submittable paper) is not met, concrete options to continue with estimated
+  hours and dollars. If the user declines, their reply wakes you to continue.
 - Write user-facing text in the charter's chat language.
 - You may read project files to judge results, but never modify anything yourself.
 - The user can message you at any time ("Messages from the user" in the state). Answer every
@@ -197,8 +210,8 @@ Project state (from the ledger):
 {context}
 
 Decide the next step. Dispatch only orders that can start now; leave dependent work for a
-later wake-up. Set `finish` only when the deliverables are in place or the project must stop;
-then write `final_summary` for the user."""
+later wake-up. Set `finish` only when the deliverables are in place or you propose to stop;
+then write `final_summary` for the user, who must confirm."""
         data, usage = self.model.ask(prompt, DECISION_SCHEMA, cwd=self.root, log_dir=log_dir)
         return Decision.from_dict(data), usage
 
