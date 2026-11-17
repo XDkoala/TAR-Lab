@@ -36,10 +36,18 @@ ORDER_SCHEMA = _obj({
 })
 ASK_SCHEMA = _obj({"kind": {"type": "string", "enum": ["question", "approval"]},
                    "text": _STR, "options": _STRS, "default": _STR})
+CHARTER_FIELDS = ("budget_usd", "deadline_hours", "approval_points", "target_venue",
+                  "constraints", "on_timeout", "approval_timeout_hours", "max_deep_searches",
+                  "chat_language", "report_language", "paper_language")
+CHANGE_SCHEMA = _obj({"field": {"type": "string", "enum": list(CHARTER_FIELDS)},
+                      "value": _STR})
 DECISION_SCHEMA = _obj({
     "rationale": _STR,
+    "message_to_user": _STR,
     "orders": {"type": "array", "items": ORDER_SCHEMA},
+    "cancel_orders": _STRS,
     "ask_user": {"type": "array", "items": ASK_SCHEMA},
+    "charter_changes": {"type": "array", "items": CHANGE_SCHEMA},
     "finish": {"type": "boolean"},
     "final_summary": _STR,
 })
@@ -71,6 +79,13 @@ Rules:
   the paper. Act on major review issues before finishing, within the remaining time.
 - Write user-facing text in the charter's chat language.
 - You may read project files to judge results, but never modify anything yourself.
+- The user can message you at any time ("Messages from the user" in the state). Answer every
+  new message in `message_to_user` (empty string when there is nothing to say) and act on
+  it: change plans, cancel running or queued orders by id in `cancel_orders` when they no
+  longer make sense, or keep them and say why.
+- Change the charter only through `charter_changes`, and only after the user has explicitly
+  confirmed that exact change (ask with kind "approval" first and restate old -> new). For
+  `approval_points` give a comma-separated list.
 
 Roles you can dispatch:
 """
@@ -95,16 +110,22 @@ class Decision:
     ask_user: tuple[dict[str, Any], ...]
     finish: bool
     final_summary: str
+    message_to_user: str = ""
+    cancel_orders: tuple[str, ...] = ()
+    charter_changes: tuple[dict[str, str], ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Decision:
         return cls(data["rationale"], tuple(data["orders"]), tuple(data["ask_user"]),
-                   bool(data["finish"]), data["final_summary"])
+                   bool(data["finish"]), data["final_summary"],
+                   data.get("message_to_user", ""), tuple(data.get("cancel_orders", ())),
+                   tuple(data.get("charter_changes", ())))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"rationale": self.rationale, "orders": list(self.orders),
-                "ask_user": list(self.ask_user), "finish": self.finish,
-                "final_summary": self.final_summary}
+        return {"rationale": self.rationale, "message_to_user": self.message_to_user,
+                "orders": list(self.orders), "cancel_orders": list(self.cancel_orders),
+                "ask_user": list(self.ask_user), "charter_changes": list(self.charter_changes),
+                "finish": self.finish, "final_summary": self.final_summary}
 
 
 @dataclass

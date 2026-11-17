@@ -223,6 +223,19 @@ def _lab_command(args: argparse.Namespace) -> int:
         lab.resume()
         print(f"Resumed. Run: tarlab run {args.project}")
         return 0
+    if args.group == "say":
+        lab.say(args.message, now=args.now)
+        print("Sent to the main agent " + ("now (it will be woken)." if args.now else
+                                           "(read after the current work order)."))
+        return 0
+    if args.group == "pause":
+        lab.pause()
+        print("The project will pause after the current work order.")
+        return 0
+    if args.group == "stop":
+        cancelled = lab.stop()
+        print(f"Stopped {', '.join(cancelled) or 'nothing running'}; the project will pause.")
+        return 0
     if args.group == "inbox":
         open_questions = lab.questions()
         for qid, ev in open_questions.items():
@@ -238,6 +251,12 @@ def _lab_command(args: argparse.Namespace) -> int:
         print(f"  {oid:28} {s.status:15} {s.result.summary[:90] if s.result else ''}")
     for qid in lab.questions():
         print(f"  open question: {qid}")
+    talk = lab._events("user.message", "pi.message")[-6:]
+    if talk:
+        print("\nconversation:")
+    for e in talk:
+        who = "you" if e.kind == "user.message" else "main agent"
+        print(f"  [{e.ts:%m-%d %H:%M}] {who}: {e.payload['text'][:300]}")
     return 0
 
 
@@ -314,9 +333,16 @@ def build_parser() -> argparse.ArgumentParser:
     run = groups.add_parser("run", help="run a project until it finishes or is suspended")
     run.add_argument("project", type=Path)
     run.add_argument("--poll", type=float, default=30.0, help="seconds between checks")
+    say = groups.add_parser("say", help="message the main agent")
+    say.add_argument("project", type=Path)
+    say.add_argument("message")
+    say.add_argument("--now", action="store_true",
+                     help="wake the main agent even while a work order is running")
     for name, help_text in (("status", "show project state"),
                             ("inbox", "list questions waiting for you"),
-                            ("resume", "resume a suspended project")):
+                            ("resume", "resume a suspended project"),
+                            ("pause", "pause after the current work order"),
+                            ("stop", "stop the running work order now and pause")):
         groups.add_parser(name, help=help_text).add_argument("project", type=Path)
     tex = groups.add_parser("tex", help="LaTeX builds in Docker").add_subparsers(
         dest="command", required=True)
@@ -387,7 +413,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         print("Sent.")
         return 0
-    if args.group in ("new", "run", "status", "inbox", "reply", "resume"):
+    if args.group in ("new", "run", "status", "inbox", "reply", "resume", "say", "pause",
+                      "stop"):
         return _lab_command(args)
     if args.command == "serve":
         run_stdio(args.ledger, args.order)

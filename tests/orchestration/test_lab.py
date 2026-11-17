@@ -1,3 +1,7 @@
+import subprocess
+import sys
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -22,9 +26,12 @@ CHARTER = {"title": "Tiny world model", "goal": "workshop paper", "target_venue"
 
 
 def decision(orders: list[dict[str, Any]] | None = None, ask: list[dict[str, Any]] | None = None,
-             finish: bool = False) -> dict[str, Any]:
-    return {"rationale": "r", "orders": orders or [], "ask_user": ask or [],
-            "finish": finish, "final_summary": "all done" if finish else ""}
+             finish: bool = False, message: str = "", cancel: list[str] | None = None,
+             changes: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    return {"rationale": "r", "message_to_user": message, "orders": orders or [],
+            "cancel_orders": cancel or [], "ask_user": ask or [],
+            "charter_changes": changes or [], "finish": finish,
+            "final_summary": "all done" if finish else ""}
 
 
 def order(role: str = "researcher", minutes: float = 30) -> dict[str, Any]:
@@ -64,10 +71,11 @@ class Clock:
 
 
 def make_lab(tmp_path: Path, model: FakeModel, results: list[WorkResult] | None = None,
-             clock: Callable[[], datetime] | None = None) -> tuple[Lab, list[str]]:
+             clock: Callable[[], datetime] | None = None, executor: Any = None,
+             threaded: bool = False) -> tuple[Lab, list[str]]:
     project = Project(tmp_path / "proj")
     project.init()
-    executor = FakeExecutor(results or [])
+    executor = executor or FakeExecutor(results or [])
     kernel = Kernel(project, Ledger(project.ledger_path), {"fake": executor})
     sent: list[str] = []
 
@@ -76,7 +84,7 @@ def make_lab(tmp_path: Path, model: FakeModel, results: list[WorkResult] | None 
             sent.append(subject)
 
     lab = Lab(kernel, MainAgent(model, project.root), Notes(),
-              {"high": "fake", "medium": "fake", "low": "fake"}, clock or Clock())
+              {"high": "fake", "medium": "fake", "low": "fake"}, clock or Clock(), threaded)
     lab.start("write a world model paper", ask=lambda q: "", confirm=lambda c: True)
     return lab, sent
 
@@ -204,3 +212,103 @@ def test_start_twice_rejected(tmp_path: Path) -> None:
     lab, _ = make_lab(tmp_path, FakeModel())
     with pytest.raises(RuntimeError):
         lab.start("again", ask=lambda q: "", confirm=lambda c: True)
+
+
+@dataclass
+class BlockingExecutor:
+    """Runs until released or until its (fake) process group is killed."""
+
+    name: str = "fake"
+    supports_resume: bool = True
+    started: threading.Event = field(default_factory=threading.Event)
+    release: threading.Event = field(default_factory=threading.Event)
+
+    def run(self, attempt: Any, emit: Any) -> WorkResult:
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                start_new_session=True)
+        emit("order.process", {"pid": proc.pid, "pgid": proc.pid})
+        self.started.set()
+        while proc.poll() is None and not self.release.is_set():
+            time.sleep(0.05)
+        proc.kill()
+        return WorkResult("done" if self.release.is_set() else "crashed", "ran",
+                          session_id="s")
+
+    def session_usage(self, session_id: str) -> Usage | None:
+        return None
+
+
+def drive(lab: Lab, until: Callable[[], bool], limit: float = 10) -> None:
+    deadline = time.monotonic() + limit
+    while not until():
+        assert time.monotonic() < deadline, "timed out"
+        lab.step()
+        time.sleep(0.05)
+
+
+def test_message_waits_for_running_order_by_default(tmp_path: Path) -> None:
+    ex = BlockingExecutor()
+    model = FakeModel([decision([order("engineer")]), decision(message="noted", finish=True)])
+    lab, sent = make_lab(tmp_path, model, executor=ex, threaded=True)
+    lab.step()  # decision 1
+    assert lab.step() == "busy" and ex.started.wait(5)
+    lab.say("use MiniGrid instead")
+    assert lab.step() == "busy" and len(model.prompts) == 3  # nobody woken yet
+    ex.release.set()
+    drive(lab, lambda: lab.status() == "finished")
+    assert "use MiniGrid instead" in model.prompts[-1] and "NEW" in model.prompts[-1]
+    assert "Message from the main agent: Tiny world model" in sent
+
+
+def test_urgent_message_wakes_agent_which_cancels_running_order(tmp_path: Path) -> None:
+    ex = BlockingExecutor()
+    model = FakeModel([decision([order("engineer")]),
+                       decision(message="stopping it", cancel=["o4-1-engineer"]),
+                       decision(finish=True)])
+    lab, _ = make_lab(tmp_path, model, executor=ex, threaded=True)
+    lab.step()
+    lab.step()
+    assert ex.started.wait(5)
+    lab.say("stop that run, wrong env", now=True)
+    drive(lab, lambda: lab.status() == "finished")
+    state = lab.ledger.orders()["o4-1-engineer"]
+    assert state.status == "cancelled" and "stop that run" in model.prompts[3]
+    assert [e.payload["text"] for e in lab._events("pi.message")] == ["stopping it"]
+
+
+def test_stop_cancels_running_order_and_suspends(tmp_path: Path) -> None:
+    ex = BlockingExecutor()
+    lab, _ = make_lab(tmp_path, FakeModel([decision([order("engineer")])]), executor=ex,
+                      threaded=True)
+    lab.step()
+    lab.step()
+    assert ex.started.wait(5)
+    assert lab.stop() == ["o4-1-engineer"]
+    drive(lab, lambda: lab.status() == "suspended")
+    assert lab.ledger.orders()["o4-1-engineer"].status == "cancelled"
+
+
+def test_pause_after_current_order(tmp_path: Path) -> None:
+    model = FakeModel([decision([order(), order("analyst")])])
+    lab, _ = make_lab(tmp_path, model, [WorkResult("done", "a", session_id="s")] * 2)
+    lab.step()
+    lab.step()  # first order runs
+    lab.pause()
+    assert lab.step() == "suspended"
+    assert lab.ledger.orders()["o4-2-analyst"].status == "pending"
+
+
+def test_charter_change_applied_once_with_validation(tmp_path: Path) -> None:
+    changes = [{"field": "budget_usd", "value": "35"},
+               {"field": "approval_points", "value": "topic, paper_final"},
+               {"field": "on_timeout", "value": "explode"}]
+    lab, sent = make_lab(tmp_path, FakeModel([decision(changes=changes, message="ok")]))
+    lab.step()
+    lab.step()
+    charter = lab.charter()
+    assert charter is not None and charter.budget_usd == 35
+    assert charter.approval_points == ("topic", "paper_final") and charter.on_timeout == "default"
+    events = lab._events("project.charter_changed")
+    assert len(events) == 1 and events[0].payload["rejected"] == [
+        {"field": "on_timeout", "value": "explode"}]
+    assert sent.count("Message from the main agent: Tiny world model") == 1

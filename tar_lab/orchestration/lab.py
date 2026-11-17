@@ -7,24 +7,27 @@ idempotently in case the loop died halfway through applying it.
 
 from __future__ import annotations
 
+import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from tar_lab.agents.main_agent import Decision, MainAgent, Question, compact
 from tar_lab.agents.roles import ROLES
-from tar_lab.core.charter import Charter
+from tar_lab.core.charter import APPROVAL_POINTS, Charter
 from tar_lab.core.ledger import Event, Ledger
 from tar_lab.core.workorder import Limits, Usage, WorkOrder
 
 from .kernel import Kernel
 from .notify import ConsoleNotifier, NotificationError, Notifier
 
-LabStatus = Literal["intake", "working", "waiting", "error", "finished", "suspended"]
-WAKE = frozenset({"project.charter", "project.resumed", "order.finished", "user.reply",
-                  "order.over_budget", "lab.idle", "lab.deadline"})
+LabStatus = Literal["intake", "working", "busy", "waiting", "error", "finished", "suspended"]
+WAKE = frozenset({"project.charter", "project.resumed", "order.finished", "order.cancelled",
+                  "user.reply", "user.message", "order.over_budget", "lab.idle",
+                  "lab.deadline"})
+BUSY_POLL_SECONDS = 5.0
 REMINDER_HOURS = (1.0, 4.0, 12.0, 24.0)
 MAX_ORDER_MINUTES = 90.0
 MAX_IDLE_WAKES = 3
@@ -43,6 +46,11 @@ class Lab:
     tiers: Mapping[str, str] = field(
         default_factory=lambda: {"high": "codex", "medium": "codex", "low": "codex"})
     clock: Callable[[], datetime] = _now
+    # Run work orders on a background thread so messages, timers and cancellations are
+    # handled while an order runs. Tests use the synchronous mode.
+    threaded: bool = True
+    _worker: threading.Thread | None = field(default=None, init=False, repr=False)
+    _recovered: bool = field(default=False, init=False, repr=False)
 
     @property
     def ledger(self) -> Ledger:
@@ -54,7 +62,7 @@ class Lab:
         return [e for e in self.ledger.events() if not kinds or e.kind in kinds]
 
     def charter(self) -> Charter | None:
-        events = self._events("project.charter")
+        events = self._events("project.charter", "project.charter_changed")
         return Charter.from_dict(events[-1].payload["charter"]) if events else None
 
     def status(self) -> LabStatus | None:
@@ -109,6 +117,22 @@ class Lab:
             raise RuntimeError("project is not suspended")
         self.ledger.append("project.resumed", None, {})
 
+    def say(self, text: str, *, now: bool = False) -> None:
+        """Message the main agent. ``now`` wakes it even while a work order is running."""
+        self.ledger.append("user.message", None, {"text": text, "now": now})
+
+    def pause(self) -> None:
+        """Suspend once the running work order (if any) has finished."""
+        self.ledger.append("project.pause_requested", None, {})
+
+    def stop(self) -> list[str]:
+        """Cancel running work orders now and suspend; returns the cancelled ids."""
+        running = [oid for oid, st in self.ledger.orders().items() if st.status == "running"]
+        for oid in running:
+            self.kernel.cancel(oid, "stopped by the user")
+        self.pause()
+        return running
+
     # ---- the loop -----------------------------------------------------------------------
 
     def run(self, poll_seconds: float = 30.0,
@@ -116,9 +140,12 @@ class Lab:
         while True:
             status = self.step()
             if status in ("finished", "suspended", "intake"):
+                self._join_worker()
                 return status
             if status in ("waiting", "error"):
                 sleep(poll_seconds)
+            elif status == "busy":
+                sleep(min(poll_seconds, BUSY_POLL_SECONDS))
 
     def step(self) -> LabStatus:
         status = self.status()
@@ -126,7 +153,10 @@ class Lab:
             return status
         charter = self.charter()
         assert charter is not None
-        self.kernel.recover()
+        busy = self._worker is not None and self._worker.is_alive()
+        if not busy and not self._recovered:
+            self.kernel.recover()  # only orders left by a previous, dead loop
+            self._recovered = True
         decisions = self._events("pi.decision")
         if decisions:
             self._apply(decisions[-1], charter)
@@ -135,8 +165,17 @@ class Lab:
         if self._timers(charter) == "suspended":
             return "suspended"
         self._check_deadline(charter)
-        if not self._urgent() and self.kernel.run_next() is not None:
-            return "working"
+        if busy:
+            return self._decide(charter) if self._urgent_message() else "busy"
+        if self._pause_requested():
+            return self._suspend("Paused by the user.")
+        if not self._urgent() and self._has_pending():
+            if not self.threaded:
+                self.kernel.run_next()
+                return "working"
+            self._worker = threading.Thread(target=self.kernel.run_next, daemon=True)
+            self._worker.start()
+            return "busy"
         if self._needs_decision():
             return self._decide(charter)
         if self.questions():
@@ -156,6 +195,22 @@ class Lab:
     def _last_seq(self, kind: str) -> int:
         events = self._events(kind)
         return events[-1].seq if events else 0
+
+    def _join_worker(self) -> None:
+        if self._worker is not None:
+            self._worker.join()
+
+    def _has_pending(self) -> bool:
+        return any(st.status in ("pending", "interrupted")
+                   for st in self.ledger.orders().values())
+
+    def _urgent_message(self) -> bool:
+        since = self._last_seq("pi.decision")
+        return any(e.seq > since and e.payload.get("now") for e in self._events("user.message"))
+
+    def _pause_requested(self) -> bool:
+        return self._last_seq("project.pause_requested") > max(
+            self._last_seq("project.resumed"), self._last_seq("project.suspended"))
 
     def _needs_decision(self) -> bool:
         since = self._last_seq("pi.decision")
@@ -233,6 +288,11 @@ class Lab:
 
     def _apply(self, ev: Event, charter: Charter) -> None:
         decision = Decision.from_dict(ev.payload["decision"])
+        applied = {e.payload.get("decision_seq") for e in self._events(
+            "pi.message", "project.charter_changed", "lab.cancel_applied")}
+        if ev.seq not in applied:
+            self._apply_once(ev.seq, decision, charter)
+            charter = self.charter() or charter
         if decision.finish:
             if not self._events("project.finished"):
                 self.ledger.append("project.finished", None, {"summary": decision.final_summary})
@@ -262,6 +322,28 @@ class Lab:
             self.ledger.append("user.question", None, payload)
             subject = "Approval needed" if q["kind"] == "approval" else "Question"
             self._notify(f"{subject}: {charter.title}", question_text(qid, payload))
+
+    def _apply_once(self, seq: int, decision: Decision, charter: Charter) -> None:
+        """Side effects that must happen once per decision, marked by ``decision_seq``."""
+        if decision.message_to_user.strip():
+            self.ledger.append("pi.message", None,
+                               {"decision_seq": seq, "text": decision.message_to_user})
+            self._notify(f"Message from the main agent: {charter.title}",
+                         decision.message_to_user)
+        cancelled = [oid for oid in decision.cancel_orders
+                     if self.kernel.cancel(oid, f"cancelled by the main agent (decision {seq})")]
+        if decision.cancel_orders:
+            self.ledger.append("lab.cancel_applied", None,
+                               {"decision_seq": seq, "cancelled": cancelled,
+                                "requested": list(decision.cancel_orders)})
+        if decision.charter_changes:
+            updated, rejected = _change_charter(charter, decision.charter_changes)
+            self.ledger.append("project.charter_changed", None, {
+                "decision_seq": seq, "charter": updated.to_dict(),
+                "changes": list(decision.charter_changes), "rejected": rejected})
+            self._notify(f"Charter changed: {charter.title}", "\n".join(
+                f"{c['field']}: {getattr(charter, c['field'])} -> {c['value']}"
+                for c in decision.charter_changes))
 
     def context(self, charter: Charter) -> str:
         elapsed = self._elapsed_hours()
@@ -296,6 +378,15 @@ class Lab:
                       f"{r['answer']}{' (default taken: no reply in time)' if r['auto'] else ''}")
             lines.append(f"- {e.payload['qid']} [{e.payload['kind']}] {e.payload['text'][:300]}"
                          f" -> {answer}")
+        lines.append("## Messages from the user")
+        msgs = self._events("user.message")
+        lines += [f"- [{e.ts:%Y-%m-%d %H:%M} UTC]{' NEW' if e.seq > since else ''}"
+                  f"{' (urgent)' if e.payload.get('now') else ''} {e.payload['text'][:1500]}"
+                  for e in msgs] or ["- (none)"]
+        replies_out = self._events("pi.message")
+        if replies_out:
+            lines.append("## Your earlier messages to the user")
+            lines += [f"- {e.payload['text'][:600]}" for e in replies_out[-5:]]
         reports = self.kernel.project.workspace / "reports"
         files = sorted(p.name for p in reports.iterdir()) if reports.is_dir() else []
         lines += ["## Files", f"workspace: {self.kernel.project.workspace}",
@@ -307,6 +398,36 @@ class Lab:
         lines += [f"- {e.kind} {e.order_id or ''} {compact(_brief(e.payload), 300)}"
                   for e in wake] or ["- (re-check)"]
         return "\n".join(lines)
+
+
+_FLOAT_FIELDS = {"budget_usd", "deadline_hours", "approval_timeout_hours"}
+
+
+def _change_charter(charter: Charter, changes: Sequence[Mapping[str, str]]
+                    ) -> tuple[Charter, list[dict[str, str]]]:
+    data = charter.to_dict()
+    rejected = []
+    for change in changes:
+        name, value = change["field"], change["value"].strip()
+        try:
+            if name in _FLOAT_FIELDS:
+                data[name] = float(value)
+            elif name == "max_deep_searches":
+                data[name] = int(value)
+            elif name == "approval_points":
+                points = [p.strip() for p in value.split(",") if p.strip()]
+                if not set(points) <= set(APPROVAL_POINTS):
+                    raise ValueError(value)
+                data[name] = points
+            elif name == "on_timeout" and value not in ("default", "suspend"):
+                raise ValueError(value)
+            elif name in data:
+                data[name] = value
+            else:
+                raise ValueError(name)
+        except ValueError:
+            rejected.append({"field": name, "value": value})
+    return Charter.from_dict(data), rejected
 
 
 def _brief(payload: Mapping[str, Any]) -> Any:

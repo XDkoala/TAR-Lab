@@ -284,3 +284,14 @@ def test_prompt_includes_role_guide_and_limits() -> None:
     for text in (render_prompt(order(), mcp_servers=["undermind"]),
                  render_prompt(order(), resume=True, mcp_servers=["undermind"])):
         assert "`undermind` MCP server is attached" in text and "get_orientation" in text
+
+
+def test_cancel_pending_and_terminal(tmp_path: Path) -> None:
+    kernel = make_kernel(tmp_path, FakeExecutor([WorkResult("done", "ok")]))
+    kernel.submit(order())
+    kernel.submit(order("wo-2"))
+    assert kernel.cancel("wo-2", "not needed")
+    kernel.run_pending()
+    states = kernel.ledger.orders()
+    assert states["wo-1"].status == "done" and states["wo-2"].status == "cancelled"
+    assert not kernel.cancel("wo-1", "too late") and not kernel.cancel("missing", "x")

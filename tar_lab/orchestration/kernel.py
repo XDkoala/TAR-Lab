@@ -67,6 +67,31 @@ class Kernel:
             raise ValueError(f"unknown executor {order.executor!r}")
         self.ledger.append("order.created", order.id, {"order": order.to_dict()})
 
+    def cancel(self, order_id: str, reason: str) -> bool:
+        """Cancel a pending order, or stop a running one; returns False if already terminal.
+
+        Safe to call from another process: a running agent is killed through its recorded
+        process group, and the kernel running it then books the order as cancelled."""
+        state = self.ledger.orders().get(order_id)
+        if state is None or state.terminal:
+            return False
+        if state.status == "running":
+            self.ledger.append("order.cancel_requested", order_id, {"reason": reason})
+            if state.pgid:
+                kill_group(state.pgid)
+        else:
+            self.ledger.append("order.cancelled", order_id, {"reason": reason})
+        return True
+
+    def _cancel_requested(self, order_id: str, attempt: int) -> str | None:
+        started = False
+        for ev in self.ledger.events(order_id):
+            if ev.kind == "order.started" and ev.payload["attempt"] == attempt:
+                started = True
+            elif started and ev.kind == "order.cancel_requested":
+                return str(ev.payload["reason"])
+        return None
+
     def recover(self) -> list[str]:
         """Mark orders left ``running`` by a dead kernel as interrupted; kill stray agents."""
         recovered = []
@@ -129,6 +154,10 @@ class Kernel:
                               self.project.attempt_dir(order.id, number), remaining, resume,
                               self.mcp_for(order))
             result = executor.run(attempt, lambda kind, payload: self._emit(order.id, kind, payload))
+            if (cancel_reason := self._cancel_requested(order.id, number)) is not None:
+                self.ledger.append("order.cancelled", order.id,
+                                   {"reason": cancel_reason, "result": result.to_dict()})
+                return
             if result.status == "crashed" and resume is not None:
                 # A failed resume falls back to a fresh attempt on the current workspace.
                 self._record_session_usage(self.ledger.orders()[order.id])

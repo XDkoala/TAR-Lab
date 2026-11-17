@@ -128,4 +128,13 @@ def _apply(state: OrderState, ev: Event) -> None:
         if state.session_id is not None:
             state.usage_by_session[state.session_id] = result.usage
     elif ev.kind == "order.cancelled":
-        state.status = "cancelled"
+        if state.started_at is not None:
+            state.used_seconds += (ev.ts - state.started_at).total_seconds()
+            state.started_at = None
+        state.status, state.pgid = "cancelled", None
+        if "result" in p:
+            result = WorkResult.from_dict(p["result"])
+            state.result = result
+            if result.session_id:
+                state.session_id = result.session_id
+                state.usage_by_session[result.session_id] = result.usage
