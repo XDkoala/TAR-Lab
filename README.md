@@ -57,10 +57,28 @@ tarlab projects/<项目>      # 直接打开某个项目
 | Ctrl+J，或 `\` + Enter | 换行 |
 | `/` 和 `@` | 补全命令、工单号、报告和工作区文件 |
 
+界面语言：`tarlab --lang en` 或环境变量 `TARLAB_LANG=en`；不指定时跟随项目的对话语言。界面里也可以用 `/lang en`、`/lang zh` 切换。
+
+## 后台常驻与非交互调用
+
+```bash
+tarlab service install projects/<项目>   # 装成 systemd 用户服务：崩溃、被杀后 30 秒自动重启，登录后自动运行
+tarlab service status|stop|start|uninstall projects/<项目>
+tarlab -p "进展如何？" projects/<项目>          # 发一条消息，等主 Agent 回答后打印（给脚本用）
+tarlab -p "进展如何？" projects/<项目> --json   # 回答和项目状态一起输出 JSON
+tarlab status projects/<项目> --json
+```
+
+- 每个项目同时只能有一个运行器，第二个会直接退出（退出码 4）。
+- 项目完成退出码为 0，暂停为 3；这两种情况服务都不会重启。
+- 想在注销后也保持运行，执行一次 `loginctl enable-linger $USER`。
+- `-p` 的退出码：拿到回答为 0；没有运行器为 2，此时消息留在队列里；超时（默认 900 秒，用 `--wait` 修改）为 124。
+
 ## 项目运行规则
 
 - **预算**：花费按 API 标价估算（订阅不另外扣钱）。花到 80% 发邮件提醒；花到 100% 新工单暂停，正在跑的工单跑完，同时问你要不要追加。回答里写一个更高的金额（如“追加到 $45”）就直接生效。
 - **并行**：最多同时跑 3 张工单；工程师工单可能占用 GPU，一次只跑一张。
+- **快照**：每张工单开始前给工作区做 git 快照。克隆进工作区的仓库，记录来源、提交号和本地改动的补丁（`workspace/.tar-lab/nested/`）。
 - **额度用完**：某个执行者报额度不足或限流时，它的工单暂停 30 分钟后自动重试，主 Agent 也一样。设置 `TARLAB_FALLBACK=codex=devin` 后，工单会改由备用执行者接着做。默认不开启，因为 Devin 超出套餐额度后按 API 价格另外收费，而且平台目前估算不了 Devin 的花费。
 
 ## 平台命令

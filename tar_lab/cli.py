@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import datetime
@@ -31,6 +32,7 @@ from .integrations.undermind import (
     UndermindSettings,
 )
 from .integrations.undermind.proxy import create_project_workspace, run_stdio
+from .orchestration import service
 from .orchestration.kernel import Kernel, McpHook, Project
 from .orchestration.lab import Lab, question_text
 from .orchestration.notify import NotificationError, default_notifier
@@ -213,12 +215,83 @@ def _undermind_workspace(lab: Lab, charter: Charter) -> None:
               "project.", file=sys.stderr)
 
 
-def _tui(project: Path | None) -> int:
+def _tui(project: Path | None, lang: str | None = None) -> int:
     from .tui.launch import main as tui_main
 
     models = {name: str(getattr(ex, "model", name)) for name, ex in _executors().items()}
     return tui_main(project, lab_for=_lab, models=models, main_model=CodexExecutor().model,
-                    init=_init_project, after_charter=_undermind_workspace)
+                    init=_init_project, after_charter=_undermind_workspace, lang=lang)
+
+
+def project_json(lab: Lab) -> dict[str, Any]:
+    """Machine-readable project state for ``--json`` output."""
+    charter = lab.charter()
+    talk = lab._events("user.message", "pi.message")[-10:]
+    return {
+        "project": str(lab.kernel.project.root),
+        "title": charter.title if charter else None,
+        "status": lab.status() or "active",
+        "spent_usd": round(lab.spend().usd, 4),
+        "budget_usd": charter.budget_usd if charter else None,
+        "charter": charter.to_dict() if charter else None,
+        "orders": {oid: {"role": s.order.role, "executor": s.order.executor,
+                         "status": s.status, "attempts": s.attempts,
+                         "summary": s.result.summary if s.result else None}
+                   for oid, s in lab.ledger.orders().items()},
+        "open_questions": [{"qid": qid, "kind": e.payload.get("kind"),
+                            "text": e.payload.get("text"),
+                            "options": e.payload.get("options", []),
+                            "default": e.payload.get("default")}
+                           for qid, e in lab.questions().items()],
+        "conversation": [{"ts": e.ts, "from": "user" if e.kind == "user.message" else "main",
+                          "text": e.payload["text"]} for e in talk],
+    }
+
+
+EXIT_NO_RUNNER, EXIT_TIMEOUT = 2, 124
+
+
+def _print_mode(argv: Sequence[str]) -> int:
+    """``tarlab -p MESSAGE [PROJECT]``: send one message, wait for the main agent's answer,
+    print it (``--json`` for the reply plus project state) and exit. For scripts."""
+    from .tui.system import runner_pids
+
+    parser = argparse.ArgumentParser(prog="tarlab -p", description=_print_mode.__doc__)
+    parser.add_argument("-p", "--print", dest="message", required=True,
+                        help="message for the main agent")
+    parser.add_argument("project", type=Path, nargs="?", default=Path.cwd())
+    parser.add_argument("--json", action="store_true", help="print JSON")
+    parser.add_argument("--now", action="store_true",
+                        help="wake the main agent even while work orders run")
+    parser.add_argument("--wait", type=float, default=900.0,
+                        help="seconds to wait for the answer (default 900; 0 = do not wait)")
+    parser.add_argument("--lang", help="ignored; accepted for symmetry with the interface")
+    args = parser.parse_args(argv)
+    lab = _lab(args.project)
+    sent = lab.say(args.message, now=args.now)
+    reply: str | None = None
+    decision_seq: int | None = None
+    running = bool(runner_pids(lab.kernel.project.root))
+    deadline = time.monotonic() + args.wait
+    while running and args.wait > 0 and time.monotonic() < deadline:
+        later = [e for e in lab._events("pi.decision") if e.seq > sent.seq]
+        if later:
+            decision_seq = later[0].seq
+            reply = later[0].payload["decision"].get("message_to_user", "")
+            break
+        time.sleep(2.0)
+    code = 0 if decision_seq is not None else (
+        EXIT_NO_RUNNER if not running else EXIT_TIMEOUT if args.wait > 0 else 0)
+    note = {EXIT_NO_RUNNER: "no runner is driving this project; the message is queued "
+                            "(start one with `tarlab run` or `tarlab service install`)",
+            EXIT_TIMEOUT: f"no answer within {args.wait:g} s; the message stays queued"}.get(code)
+    if args.json:
+        _print_json({"sent_seq": sent.seq, "decision_seq": decision_seq, "reply": reply,
+                     "note": note, **project_json(lab)})
+    else:
+        print(reply if reply is not None else note or "Sent.",
+              file=sys.stdout if reply is not None or code == 0 else sys.stderr)
+    return code
 
 
 def _lab_command(args: argparse.Namespace) -> int:
@@ -241,15 +314,25 @@ def _lab_command(args: argparse.Namespace) -> int:
         return 0
     lab = _lab(args.project)
     if args.group == "run":
-        status = lab.run(poll_seconds=args.poll)
+        with service.runner_lock(lab.kernel.project.root) as acquired:
+            if not acquired:
+                print("Another runner already drives this project.", file=sys.stderr)
+                return service.EXIT_ALREADY_RUNNING
+            status = lab.run(poll_seconds=args.poll)
         print(f"Project {status}.")
-        return 0 if status == "finished" else 1
+        return {"finished": service.EXIT_FINISHED,
+                "suspended": service.EXIT_SUSPENDED}.get(status, 1)
     if args.group == "reply":
         lab.reply(args.qid, args.answer)
         print(f"Answer recorded for {args.qid}.")
         return 0
     if args.group == "resume":
         lab.resume()
+        if service.installed(args.project):
+            result = service.control(args.project, "start")
+            print("Resumed; the service is running again." if result.returncode == 0 else
+                  f"Resumed, but the service did not start: {result.stderr.strip()}")
+            return result.returncode
         print(f"Resumed. Run: tarlab run {args.project}")
         return 0
     if args.group == "say":
@@ -272,6 +355,9 @@ def _lab_command(args: argparse.Namespace) -> int:
         if not open_questions:
             print("No open questions.")
         return 0
+    if getattr(args, "json", False):
+        _print_json(project_json(lab))
+        return 0
     charter = lab.charter()
     if charter:
         _show_charter(charter)
@@ -287,6 +373,26 @@ def _lab_command(args: argparse.Namespace) -> int:
         who = "you" if e.kind == "user.message" else "main agent"
         print(f"  [{e.ts:%m-%d %H:%M}] {who}: {e.payload['text'][:300]}")
     return 0
+
+
+def _service_command(args: argparse.Namespace) -> int:
+    root = args.project.resolve()
+    if not (root / "ledger.sqlite").exists():
+        raise SystemExit(f"{root} is not a TAR-Lab project")
+    if args.command == "install":
+        print("\n".join(service.install(root)))
+        if not service.lingering():
+            print("Note: the service stops when you log out. To keep it running, run "
+                  f"`loginctl enable-linger {os.environ.get('USER', '$USER')}` once.")
+        return 0
+    if args.command == "uninstall":
+        print("Removed." if service.uninstall(root) else "Not installed.")
+        return 0
+    if not service.installed(root):
+        raise SystemExit(f"Not installed; run `tarlab service install {args.project}`")
+    result = service.control(root, args.command)
+    print((result.stdout or result.stderr).strip() or "ok")
+    return 0 if args.command == "status" else result.returncode
 
 
 def _order_command(args: argparse.Namespace) -> int:
@@ -324,8 +430,13 @@ def _order_command(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tarlab", description="TAR-Lab research platform")
     groups = parser.add_subparsers(dest="group", required=True)
-    groups.add_parser("ui", help="interactive session (default when no command is given)"
-                      ).add_argument("project", type=Path, nargs="?")
+    ui = groups.add_parser("ui", help="interactive session (default when no command is given)")
+    ui.add_argument("project", type=Path, nargs="?")
+    ui.add_argument("--lang", choices=["zh", "en"],
+                    help="interface language (default: TARLAB_LANG, else the project's chat "
+                         "language)")
+    parser.epilog = ("Non-interactive: tarlab -p MESSAGE [PROJECT] [--json] [--now] [--wait S]"
+                     " sends a message and prints the main agent's answer.")
 
     um = groups.add_parser("undermind", help="Undermind MCP connection").add_subparsers(
         dest="command", required=True)
@@ -379,8 +490,10 @@ def build_parser() -> argparse.ArgumentParser:
     say.add_argument("message")
     say.add_argument("--now", action="store_true",
                      help="wake the main agent even while a work order is running")
-    for name, help_text in (("status", "show project state"),
-                            ("inbox", "list questions waiting for you"),
+    status = groups.add_parser("status", help="show project state")
+    status.add_argument("project", type=Path)
+    status.add_argument("--json", action="store_true", help="print JSON")
+    for name, help_text in (("inbox", "list questions waiting for you"),
                             ("resume", "resume a suspended project"),
                             ("pause", "pause after the current work order"),
                             ("stop", "stop the running work order now and pause")):
@@ -390,6 +503,13 @@ def build_parser() -> argparse.ArgumentParser:
     tex_build = tex.add_parser("build", help="compile a paper directory to PDF")
     tex_build.add_argument("paper_dir", type=Path)
     tex_build.add_argument("--main", default="main.tex")
+    svc = groups.add_parser("service", help="keep a project running as a systemd user service"
+                            ).add_subparsers(dest="command", required=True)
+    for name, help_text in (("install", "install, enable and start the service"),
+                            ("uninstall", "stop and remove the service"),
+                            ("start", "start the service"), ("stop", "stop the service"),
+                            ("status", "show the service state")):
+        svc.add_parser(name, help=help_text).add_argument("project", type=Path)
     groups.add_parser("notify-test", help="send a test notification (console and email)")
     reply = groups.add_parser("reply", help="answer a question or approval")
     reply.add_argument("project", type=Path)
@@ -429,11 +549,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     commands = next(a for a in parser._actions
                     if isinstance(a, argparse._SubParsersAction)).choices
-    if not argv or (argv[0] not in commands and not argv[0].startswith("-")):
+    if any(a in ("-p", "--print") or a.startswith("--print=") for a in argv):
+        return _print_mode(argv)
+    if not argv or (argv[0] not in commands and argv[0] not in ("-h", "--help")):
         argv = ["ui", *argv]
     args = parser.parse_args(argv)
     if args.group == "ui":
-        return _tui(args.project)
+        return _tui(args.project, args.lang)
     # The SDK logs a traceback for every failed OAuth flow; the CLI reports the error itself.
     logging.getLogger("mcp.client.auth").setLevel(logging.CRITICAL)
     if args.group == "engine":
@@ -459,6 +581,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = build_tex(args.paper_dir, args.main)
         print(f"PDF: {result.pdf}" if result.pdf else f"Build failed; see {result.log}")
         return 0 if result.pdf else 1
+    if args.group == "service":
+        return _service_command(args)
     if args.group == "notify-test":
         try:
             default_notifier().notify("Test notification", "TAR-Lab can reach you here.")

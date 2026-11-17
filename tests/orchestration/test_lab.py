@@ -505,3 +505,21 @@ def test_main_agent_out_of_quota_waits_instead_of_failing(tmp_path: Path) -> Non
     clock.offset = timedelta(minutes=31)
     lab.step()
     assert [e.payload["text"] for e in lab._events("pi.message")] == ["back"]
+
+
+def test_platform_questions_follow_the_charters_chat_language(tmp_path: Path) -> None:
+    from tar_lab.orchestration.lab import FINISH_YES_EN
+
+    model = FakeModel([decision(finish=True)])
+    lab, _ = make_lab(tmp_path, model, confirm_finish=True)
+    charter = lab.charter()
+    assert charter is not None
+    lab.ledger.append("project.charter_changed", None,
+                      {"charter": {**charter.to_dict(), "chat_language": "en"}, "changes": []})
+    lab.step()
+    lab.step()
+    [(qid, q)] = lab.questions().items()
+    assert q.payload["text"].startswith("The main agent proposes") and FINISH_YES_EN in \
+        q.payload["options"]
+    lab.reply(qid, FINISH_YES_EN)
+    assert lab.step() == "finished"

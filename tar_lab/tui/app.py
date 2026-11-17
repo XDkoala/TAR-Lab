@@ -32,11 +32,12 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from tar_lab.i18n import Terms, language, set_language, tr
 from tar_lab.orchestration.lab import Lab
 
 from . import render
 from .state import ProjectState, ProjectView
-from .system import GpuInfo, gpu_info, runner_pids, start_runner
+from .system import GpuInfo, gpu_info, runner_pids, start_background
 
 STYLE = Style.from_dict({
     "accent": "ansicyan", "role": "bold", "dim": "#8a8a8a", "ok": "ansigreen",
@@ -44,24 +45,26 @@ STYLE = Style.from_dict({
     "bottom-toolbar": "noreverse bg:default", "bottom-toolbar.text": "",
 })
 
-COMMANDS: dict[str, str] = {
-    "/help": "命令和快捷键",
-    "/status": "项目章程与进度",
-    "/agents": "所有工单（子 Agent）",
-    "/agent": "某个子 Agent 的详情：/agent <工单号>",
-    "/approve": "回答待审批的问题（Ctrl+A）",
-    "/inbox": "列出待你回答的问题",
-    "/now": "紧急留言，立刻叫醒主 Agent：/now <消息>",
-    "/cost": "花费明细（按 API 标价估算）",
-    "/reports": "列出报告",
-    "/report": "查看报告：/report <文件名>",
-    "/pause": "当前工单完成后暂停",
-    "/stop": "立刻停止当前工单并暂停",
-    "/resume": "恢复已暂停的项目",
-    "/run": "在后台启动项目运行器",
-    "/clear": "清屏",
-    "/quit": "退出界面（项目继续在后台运行）",
-}
+COMMANDS = Terms({
+    "/help": ("命令和快捷键", "commands and keys"),
+    "/status": ("项目章程与进度", "charter and progress"),
+    "/agents": ("所有工单（子 Agent）", "all work orders (sub-agents)"),
+    "/agent": ("某个子 Agent 的详情：/agent <工单号>", "one sub-agent in detail: /agent <order>"),
+    "/approve": ("回答待审批的问题（Ctrl+A）", "answer a pending question (Ctrl+A)"),
+    "/inbox": ("列出待你回答的问题", "list questions waiting for you"),
+    "/now": ("紧急留言，立刻叫醒主 Agent：/now <消息>",
+             "urgent message, wakes the main agent: /now <text>"),
+    "/cost": ("花费明细（按 API 标价估算）", "spend by role (API list-price estimate)"),
+    "/reports": ("列出报告", "list reports"),
+    "/report": ("查看报告：/report <文件名>", "show a report: /report <file>"),
+    "/pause": ("当前工单完成后暂停", "pause after the current order"),
+    "/stop": ("立刻停止当前工单并暂停", "stop running orders now and pause"),
+    "/resume": ("恢复已暂停的项目", "resume a suspended project"),
+    "/run": ("在后台启动项目运行器", "start the project runner in the background"),
+    "/lang": ("切换界面语言：/lang zh 或 /lang en", "interface language: /lang zh or /lang en"),
+    "/clear": ("清屏", "clear the screen"),
+    "/quit": ("退出界面（项目继续在后台运行）", "leave (the project keeps running)"),
+})
 REFRESH_SECONDS = 1.0
 GPU_SECONDS = 5.0
 HISTORY_ITEMS = 12
@@ -160,7 +163,7 @@ class Tui:
                 self.refresh()
                 self.tick += 1
             except Exception as exc:  # noqa: BLE001 - a bad read must not kill the interface
-                self.say_flash(f"刷新失败：{exc}")
+                self.say_flash(tr("刷新失败：", "Refresh failed: ") + str(exc))
 
     def arguments(self, cmd: str) -> list[tuple[str, str]]:
         view = self.view
@@ -174,6 +177,8 @@ class Tui:
                     for qid, q in view.questions.items()]
         if cmd == "/report":
             return [(p, "") for p in self.reports()]
+        if cmd == "/lang":
+            return [("zh", "中文"), ("en", "English")]
         return []
 
     def reports(self) -> list[str]:
@@ -237,7 +242,8 @@ class Tui:
             if text:
                 event.app.exit(result=("urgent", text))
             else:
-                self.say_flash("先输入消息，再按 Esc 紧急发送（立刻叫醒主 Agent）")
+                self.say_flash(tr("先输入消息，再按 Esc 紧急发送（立刻叫醒主 Agent）",
+                                   "Type a message first; Esc sends it urgently"))
 
         @kb.add("c-a")
         def _approve(event: KeyPressEvent) -> None:
@@ -273,8 +279,10 @@ class Tui:
         t.append("TAR-Lab", style="bold cyan")
         t.append(f"  {view.title if view else self.root.name}\n", style="bold")
         t.append(f"{self.root}\n", style="grey62")
-        t.append("直接输入和主 Agent 对话 · / 命令 · @ 引用文件 · Esc 紧急发送 · "
-                 "Ctrl+A 审批 · Ctrl+O 展开子 Agent · Ctrl+J 换行", style="grey62")
+        t.append(tr("直接输入和主 Agent 对话 · / 命令 · @ 引用文件 · Esc 紧急发送 · "
+                    "Ctrl+A 审批 · Ctrl+O 展开子 Agent · Ctrl+J 换行",
+                    "Type to talk to the main agent · / commands · @ files · Esc urgent · "
+                    "Ctrl+A approve · Ctrl+O sub-agents · Ctrl+J newline"), style="grey62")
         return Panel(t, border_style="cyan", expand=False)
 
     def start(self) -> None:
@@ -284,8 +292,9 @@ class Tui:
         self.emit(self.header())
         history = [r for e in events if (r := render.feed_item(e, self.view.orders)) is not None]
         if len(history) > HISTORY_ITEMS:
-            self.emit(Text(f"… 更早的 {len(history) - HISTORY_ITEMS} 条记录用 /status、/agents "
-                           "查看", style="grey50"))
+            older = len(history) - HISTORY_ITEMS
+            self.emit(Text(tr(f"… 更早的 {older} 条记录用 /status、/agents 查看",
+                              f"… {older} older items: see /status, /agents"), style="grey50"))
         self.emit(*history[-HISTORY_ITEMS:])
         self._gpu_at = 0.0
         self.refresh()
@@ -309,8 +318,10 @@ class Tui:
         finally:
             self.close()
         alive = bool(self.runners(self.root))
-        self.console.print(Text("已退出界面。" + ("项目在后台继续运行，随时用 tarlab 重新打开。"
-                                                 if alive else ""), style="grey62"))
+        self.console.print(Text(tr("已退出界面。", "Left the interface. ") + (
+            tr("项目在后台继续运行，随时用 tarlab 重新打开。",
+               "The project keeps running; reopen it any time with tarlab.")
+            if alive else ""), style="grey62"))
         return 0
 
     def _loop(self) -> None:
@@ -321,7 +332,8 @@ class Tui:
                 if time.monotonic() - self._last_interrupt < 2.0:
                     return
                 self._last_interrupt = time.monotonic()
-                self.say_flash("再按一次 Ctrl+C 退出界面（项目不会停止）", 2.0)
+                self.say_flash(tr("再按一次 Ctrl+C 退出界面（项目不会停止）",
+                                   "Press Ctrl+C again to leave (the project keeps running)"), 2.0)
                 continue
             except EOFError:
                 return
@@ -351,12 +363,13 @@ class Tui:
             return False
         handler = getattr(self, "cmd_" + cmd[1:].replace("-", "_"), None)
         if handler is None or cmd not in COMMANDS:
-            self.emit(Text(f"未知命令 {cmd}，输入 /help 查看命令", style="red"))
+            self.emit(Text(tr(f"未知命令 {cmd}，输入 /help 查看命令",
+                              f"Unknown command {cmd}; see /help"), style="red"))
             return True
         try:
             handler(arg)
         except (KeyError, RuntimeError, OSError, ValueError) as exc:
-            self.emit(Text(f"{cmd} 失败：{exc}", style="red"))
+            self.emit(Text(f"{cmd} " + tr("失败：", "failed: ") + str(exc), style="red"))
         return True
 
     def send(self, text: str, *, now: bool) -> None:
@@ -366,13 +379,18 @@ class Tui:
         self.refresh()
         busy = bool(self.view and any(a.status == "running" for a in self.view.agents))
         if not self._runner_alive:
-            note = "已记录。后台未运行，用 /run 启动后主 Agent 才会处理。"
+            note = tr("已记录。后台未运行，用 /run 启动后主 Agent 才会处理。",
+                      "Recorded. The runner is stopped; start it with /run to get an answer.")
         elif now:
-            note = "已紧急发送，正在叫醒主 Agent；当前工单继续运行，由它决定是否停下。"
+            note = tr("已紧急发送，正在叫醒主 Agent；当前工单继续运行，由它决定是否停下。",
+                      "Sent urgently; the main agent is being woken and decides whether to "
+                      "stop the running orders.")
         elif busy:
-            note = "已发送，主 Agent 会在当前工单完成后读到。急的话用 Esc 或在末尾加 ! 紧急发送。"
+            note = tr("已发送，主 Agent 会在当前工单完成后读到。急的话用 Esc 或在末尾加 ! 紧急发送。",
+                      "Sent; the main agent reads it when an order ends. For urgent ones use "
+                      "Esc or end with !.")
         else:
-            note = "已发送，主 Agent 马上会读到。"
+            note = tr("已发送，主 Agent 马上会读到。", "Sent; the main agent reads it now.")
         self.emit(render._sub(note))
 
     def _choose(self, message: str, options: list[tuple[str, str]],
@@ -388,11 +406,17 @@ class Tui:
         t.add_column()
         for name, meta in COMMANDS.items():
             t.add_row(name, meta)
-        for key, meta in (("Enter", "发送（主 Agent 在当前工单完成后读到）"),
-                          ("Esc / 末尾加 !", "紧急发送，立刻叫醒主 Agent"),
-                          ("Ctrl+A", "回答待审批的问题"), ("Ctrl+O", "展开/收起子 Agent 最近步骤"),
-                          ("Ctrl+J 或 \\ + Enter", "换行"), ("@路径", "引用工作区里的文件"),
-                          ("↑ / ↓", "历史输入"), ("Ctrl+C 两次 / Ctrl+D", "退出界面")):
+        for key, meta in (
+                ("Enter", tr("发送（主 Agent 在当前工单完成后读到）",
+                             "send (read when the current order ends)")),
+                (tr("Esc / 末尾加 !", "Esc / end with !"),
+                 tr("紧急发送，立刻叫醒主 Agent", "send urgently, wakes the main agent")),
+                ("Ctrl+A", tr("回答待审批的问题", "answer a pending question")),
+                ("Ctrl+O", tr("展开/收起子 Agent 最近步骤", "show/hide sub-agents' recent steps")),
+                (tr("Ctrl+J 或 \\ + Enter", "Ctrl+J or \\ + Enter"), tr("换行", "new line")),
+                (tr("@路径", "@path"), tr("引用工作区里的文件", "refer to a workspace file")),
+                ("↑ / ↓", tr("历史输入", "input history")),
+                (tr("Ctrl+C 两次 / Ctrl+D", "Ctrl+C twice / Ctrl+D"), tr("退出界面", "leave"))):
             t.add_row(key, meta)
         self.emit(t)
 
@@ -401,7 +425,8 @@ class Tui:
         if charter is not None:
             self.emit(render.charter_panel(charter))
         if self.view is not None:
-            self.emit(Text(f"阶段：{render.PHASES.get(self.view.phase, self.view.phase)}"),
+            self.emit(Text(tr("阶段：", "Phase: ")
+                           + render.PHASES.get(self.view.phase, self.view.phase)),
                       render.orders_table(self.view, self._costs()))
 
     def _costs(self) -> dict[str, float | None]:
@@ -419,14 +444,15 @@ class Tui:
             arg = running[-1] if running else ""
         state = self.view.orders.get(arg)
         if state is None:
-            raise KeyError(f"没有工单 {arg or '（无运行中的工单）'}，用 /agents 查看")
+            raise KeyError(tr(f"没有工单 {arg or '（无运行中的工单）'}，用 /agents 查看",
+                              f"no order {arg or '(nothing running)'}; see /agents"))
         self.emit(render.agent_detail(self.state.order_view(arg, state, self._gpu), state,
                                       self.console.width))
 
     def cmd_inbox(self, _: str) -> None:
         assert self.view is not None
         if not self.view.questions:
-            self.emit(Text("没有待你回答的问题。", style="grey62"))
+            self.emit(Text(tr("没有待你回答的问题。", "No questions waiting."), style="grey62"))
         self.emit(*(render.question_panel(q, p) for q, p in self.view.questions.items()))
 
     def cmd_approve(self, arg: str) -> None:
@@ -434,27 +460,30 @@ class Tui:
         assert self.view is not None
         questions = self.view.questions
         if not questions:
-            self.emit(Text("没有待你回答的问题。", style="grey62"))
+            self.emit(Text(tr("没有待你回答的问题。", "No questions waiting."), style="grey62"))
             return
         qid = arg or next(iter(questions))
         if not arg and len(questions) > 1:
-            qid = self._choose("回答哪个问题？", [(q, f"{q}  {render.clip(str(p['text']), 60)}")
+            qid = self._choose(tr("回答哪个问题？", "Answer which question?"), [(q, f"{q}  {render.clip(str(p['text']), 60)}")
                                               for q, p in questions.items()]) or ""
         if qid not in questions:
-            raise KeyError(f"没有待回答的问题 {qid}")
+            raise KeyError(tr(f"没有待回答的问题 {qid}", f"no open question {qid}"))
         q = questions[qid]
         options = [(o, o) for o in q.get("options", [])]
-        options += [("\0custom", "自己输入回答…"), ("\0discuss", "先和主 Agent 讨论（暂不回答）"),
-                    ("\0cancel", "取消")]
+        options += [("\0custom", tr("自己输入回答…", "Type my own answer…")),
+                    ("\0discuss", tr("先和主 Agent 讨论（暂不回答）", "Discuss first (answer later)")),
+                    ("\0cancel", tr("取消", "Cancel"))]
         picked = self._choose(f"{qid} · {q['text']}", options)
         if picked in (None, "\0cancel"):
             return
         if picked == "\0discuss":
-            self.emit(render._sub("直接输入你的问题或意见发给主 Agent；审批会一直等你回答。"))
+            self.emit(render._sub(tr("直接输入你的问题或意见发给主 Agent；审批会一直等你回答。",
+                                     "Type your question or view for the main agent; the "
+                                     "approval waits for your answer.")))
             return
         if picked == "\0custom":
             try:
-                picked = prompt("你的回答 › ", style=STYLE).strip()
+                picked = prompt(tr("你的回答 › ", "Your answer › "), style=STYLE).strip()
             except (KeyboardInterrupt, EOFError):
                 return
             if not picked:
@@ -467,9 +496,9 @@ class Tui:
     def cmd_cost(self, _: str) -> None:
         assert self.view is not None
         t = Table(box=None, padding=(0, 2), header_style="grey62")
-        t.add_column("项")
+        t.add_column(tr("项", "Item"))
         t.add_column("token", justify="right")
-        t.add_column("≈ 美元", justify="right")
+        t.add_column(tr("≈ 美元", "≈ USD"), justify="right")
         by_role: dict[str, list[float]] = {}
         for s in self.view.orders.values():
             row = by_role.setdefault(render.role(s.order.role), [0.0, 0.0])
@@ -478,15 +507,18 @@ class Tui:
         for name, (tok, usd) in by_role.items():
             t.add_row(name, render.tokens(int(tok)), f"{usd:.2f}")
         main = self.view.spent_usd - sum(v[1] for v in by_role.values())
-        t.add_row("主 Agent（立项与决策）", "", f"{main:.2f}")
-        t.add_row(Text("合计", style="bold"), "",
+        t.add_row(tr("主 Agent（立项与决策）", "Main agent (intake, decisions)"), "", f"{main:.2f}")
+        t.add_row(Text(tr("合计", "Total"), style="bold"), "",
                   Text(f"{self.view.spent_usd:.2f} / {self.view.budget_usd:g}", style="bold"))
-        self.emit(t, Text("按 API 标价估算。走订阅时不另外付费，只消耗订阅额度；运行中的工单"
-                          "结束后才计入。", style="grey62"))
+        self.emit(t, Text(tr("按 API 标价估算。走订阅时不另外付费，只消耗订阅额度；运行中的工单"
+                             "结束后才计入。",
+                             "Estimated at API list prices; a subscription uses its quota and "
+                             "is not billed per token. Running orders count once they end."),
+                          style="grey62"))
 
     def cmd_reports(self, _: str) -> None:
         names = self.reports()
-        self.emit(Text("\n".join(names) or "还没有报告。", style="cyan" if names else "grey62"))
+        self.emit(Text("\n".join(names) or tr("还没有报告。", "No reports yet."), style="cyan" if names else "grey62"))
 
     def cmd_report(self, arg: str) -> None:
         if not arg:
@@ -495,38 +527,50 @@ class Tui:
         d = self.state.project.workspace / "reports"
         path = (d / arg).resolve()
         if not path.is_relative_to(d.resolve()) or not path.is_file():
-            raise KeyError(f"没有报告 {arg}，用 /reports 查看")
+            raise KeyError(tr(f"没有报告 {arg}，用 /reports 查看", f"no report {arg}; see /reports"))
         text = path.read_text(errors="replace")
         limit = 30000
         self.emit(Panel(Markdown(text[:limit]), title=arg, title_align="left",
                         border_style="grey50"))
         if len(text) > limit:
-            self.emit(render._sub(f"只显示了前 {limit} 个字符，全文：{path}"))
+            self.emit(render._sub(tr(f"只显示了前 {limit} 个字符，全文：{path}",
+                                     f"Showing the first {limit} characters; full text: {path}")))
 
     def cmd_pause(self, _: str) -> None:
         self.lab.pause()
-        self.emit(render._sub("当前工单完成后暂停。"))
+        self.emit(render._sub(tr("当前工单完成后暂停。", "Pausing after the current order.")))
 
     def cmd_stop(self, _: str) -> None:
-        if self._choose("立刻停止正在运行的工单并暂停项目？",
-                        [("yes", "停止"), ("no", "取消")], "no") == "yes":
-            stopped = self.lab.stop()
-            self.emit(render._sub(f"已停止 {', '.join(stopped) or '（无运行中的工单）'}，项目将暂停。"))
+        if self._choose(tr("立刻停止正在运行的工单并暂停项目？",
+                           "Stop the running orders now and pause the project?"),
+                        [("yes", tr("停止", "Stop")), ("no", tr("取消", "Cancel"))], "no") == "yes":
+            stopped = ", ".join(self.lab.stop())
+            self.emit(render._sub(tr(f"已停止 {stopped or '（无运行中的工单）'}，项目将暂停。",
+                                     f"Stopped {stopped or '(nothing running)'}; pausing.")))
 
     def cmd_resume(self, _: str) -> None:
         self.lab.resume()
-        self.emit(render._sub("已恢复。"))
+        self.emit(render._sub(tr("已恢复。", "Resumed.")))
         if not self.runners(self.root):
             self.cmd_run("")
 
     def cmd_run(self, _: str) -> None:
         pids = self.runners(self.root)
         if pids:
-            self.emit(render._sub(f"后台已在运行（PID {', '.join(map(str, pids))}）。"))
+            joined = ", ".join(map(str, pids))
+            self.emit(render._sub(tr(f"后台已在运行（PID {joined}）。",
+                                     f"The runner is already on (PID {joined}).")))
             return
-        pid, log = start_runner(self.root)
+        note = start_background(self.root)
         self._runner_alive = True
-        self.emit(render._sub(f"已在后台启动（PID {pid}），日志：{log}"))
+        self.emit(render._sub(note))
+
+    def cmd_lang(self, arg: str) -> None:
+        if arg not in ("zh", "en"):
+            raise ValueError(tr(f"当前是 {language()}；用 /lang zh 或 /lang en",
+                                f"current: {language()}; use /lang zh or /lang en"))
+        set_language(arg)
+        self.emit(render._sub(tr("界面语言：中文", "Interface language: English")))
 
     def cmd_clear(self, _: str) -> None:
         self.console.clear()

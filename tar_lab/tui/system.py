@@ -73,3 +73,22 @@ def start_runner(root: Path, poll_seconds: float = 30.0) -> tuple[int, Path]:
             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env,
             start_new_session=True)
     return proc.pid, log
+
+
+def start_background(root: Path) -> str:
+    """Start the runner through its systemd service when installed, else detached; returns a
+    line for the user."""
+    from tar_lab.i18n import tr
+    from tar_lab.orchestration import service
+
+    if service.installed(root):
+        result = service.control(root, "start")
+        if result.returncode == 0:
+            return tr("已通过 systemd 服务启动（崩溃后自动重启）。",
+                      "Started through the systemd service (restarts after a crash).")
+        return tr("systemd 启动失败：", "systemd start failed: ") + result.stderr.strip()
+    pid, log = start_runner(root)
+    return tr(f"已在后台启动（PID {pid}），日志：{log}。要崩溃后自动重启，运行 "
+              f"`tarlab service install {root}`。",
+              f"Started in the background (PID {pid}), log: {log}. For restarts after a "
+              f"crash, run `tarlab service install {root}`.")

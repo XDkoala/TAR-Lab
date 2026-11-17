@@ -242,14 +242,15 @@ def test_completion_lists_commands_and_files(session: tuple[Tui, FakeLab, Any, i
 
 def test_cli_routes_bare_project_to_the_interface(monkeypatch: pytest.MonkeyPatch,
                                                   project: Path) -> None:
-    seen: list[Path | None] = []
+    seen: list[tuple[Path | None, str | None]] = []
 
-    def fake_tui(p: Path | None) -> int:
-        seen.append(p)
+    def fake_tui(p: Path | None, lang: str | None = None) -> int:
+        seen.append((p, lang))
         return 0
     monkeypatch.setattr("tar_lab.cli._tui", fake_tui)
     assert cli_main([str(project)]) == 0 and cli_main([]) == 0 and cli_main(["ui"]) == 0
-    assert seen == [project, None, None]
+    assert cli_main(["--lang", "en", str(project)]) == 0
+    assert seen == [(project, None), (None, None), (None, None), (project, "en")]
 
 
 def test_stale_decision_dir_is_not_thinking(project: Path) -> None:
@@ -312,3 +313,19 @@ def test_toolbar_shows_literature_use_and_undermind_trouble(project: Path) -> No
     bar = "".join(t for _, t in render.toolbar(view, runner_alive=True, width=200))
     assert "文献 Undermind 2，错 1 / 开放源 1" in bar and "额度用完，已改用开放文献源" in bar
     state.close()
+
+
+def test_interface_language_switches_to_english(project: Path) -> None:
+    from tar_lab.i18n import choose, set_language
+
+    state = ProjectState(project, {"codex": "gpt-6.1-sol"}, "gpt-6.1-sol")
+    try:
+        set_language("en")
+        bar = "".join(t for _, t in render.toolbar(state.snapshot(), False, 120))
+        assert "awaiting approval" in bar and "runner stopped" in bar
+        assert render.ROLES["engineer"] == "engineer"
+        assert choose(None, "en") == "en" and choose("zh", "en") == "zh"
+    finally:
+        set_language("zh")
+        state.close()
+    assert render.ROLES["engineer"] == "工程师"

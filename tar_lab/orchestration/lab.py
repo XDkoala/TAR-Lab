@@ -22,6 +22,7 @@ from tar_lab.core.charter import APPROVAL_POINTS, Charter
 from tar_lab.core.ledger import Event, Ledger
 from tar_lab.core.pricing import Spend, project_spend
 from tar_lab.core.workorder import Limits, WorkOrder
+from tar_lab.i18n import pick
 from tar_lab.integrations.cli_agents.process import quota_error
 
 from .kernel import Kernel
@@ -41,12 +42,15 @@ MAX_DECISION_ERRORS = 3
 LITERATURE_ALERT_HOURS = 6.0
 FINISH_YES = "确认结束项目"
 FINISH_NO = "不结束，继续工作（请写明方向）"
+FINISH_YES_EN = "Finish the project"
+FINISH_NO_EN = "Keep working (say what next)"
 TOPIC_SUMMARY = "reports/topic_summary.md"
 SUMMARY_MAX_CHARS = 4000
 MAX_TOPIC_HOLDS = 2
 DEEP_SEARCH = "launch_deep_search"
 BUDGET_WARN_FRACTION = 0.8
 BUDGET_NO = "不追加，用现有结果收尾"
+BUDGET_NO_EN = "No more budget; wrap up with what we have"
 MAX_PARALLEL_ORDERS = 3
 # Roles whose orders may use the GPU run one at a time; the rest run alongside them.
 EXCLUSIVE_ROLES = frozenset({"engineer"})
@@ -138,9 +142,9 @@ class Lab:
             raise RuntimeError("project is not suspended")
         self.ledger.append("project.resumed", None, {})
 
-    def say(self, text: str, *, now: bool = False) -> None:
+    def say(self, text: str, *, now: bool = False) -> Event:
         """Message the main agent. ``now`` wakes it even while a work order is running."""
-        self.ledger.append("user.message", None, {"text": text, "now": now})
+        return self.ledger.append("user.message", None, {"text": text, "now": now})
 
     def pause(self) -> None:
         """Suspend once the running work order (if any) has finished."""
@@ -277,6 +281,7 @@ class Lab:
         """Warn at 80 % of the budget; at 100 % hold new orders and ask the user whether to
         raise it. Each level fires once per budget value. Returns whether it is used up."""
         spent, budget = self.spend().usd, charter.budget_usd
+        lang = charter.chat_language
         fired = {(e.payload["level"], e.payload["budget_usd"]) for e in self._events("lab.budget")}
         for level, fraction in (("warn", BUDGET_WARN_FRACTION), ("exhausted", 1.0)):
             if spent < fraction * budget or (level, budget) in fired or (
@@ -286,16 +291,24 @@ class Lab:
                 "level": level, "spent_usd": round(spent, 4), "budget_usd": budget})
             if level == "warn":
                 self._notify(f"Budget {spent / budget:.0%} used: {charter.title}",
-                             f"已花费约 ${spent:.2f}（按 API 标价估算），预算 ${budget:g}。")
+                             pick(lang, f"已花费约 ${spent:.2f}（按 API 标价估算），预算 ${budget:g}。",
+                                  f"About ${spent:.2f} spent (API list-price estimate) of the "
+                                  f"${budget:g} budget."))
                 continue
             qid = f"q{ev.seq}-budget"
             payload = {"qid": qid, "kind": "approval", "purpose": "budget",
-                       "text": f"已花费约 ${spent:.2f}（按 API 标价估算），用完了预算 ${budget:g}。"
-                               "新工单已暂停，正在跑的工单会跑完。要追加预算吗？可以选一个金额，"
-                               "也可以直接写别的金额。",
-                       "options": [f"追加到 ${math.ceil(budget * 1.5)}",
-                                   f"追加到 ${math.ceil(budget * 2)}", BUDGET_NO],
-                       "default": BUDGET_NO}
+                       "text": pick(lang,
+                                    f"已花费约 ${spent:.2f}（按 API 标价估算），用完了预算 "
+                                    f"${budget:g}。新工单已暂停，正在跑的工单会跑完。要追加预算吗？"
+                                    "可以选一个金额，也可以直接写别的金额。",
+                                    f"About ${spent:.2f} spent (API list-price estimate): the "
+                                    f"${budget:g} budget is used up. New orders are held; running "
+                                    "ones finish. Raise the budget? Pick an amount or write "
+                                    "another one."),
+                       "options": [pick(lang, "追加到 ", "Raise to ") + f"${math.ceil(budget * 1.5)}",
+                                   pick(lang, "追加到 ", "Raise to ") + f"${math.ceil(budget * 2)}",
+                                   pick(lang, BUDGET_NO, BUDGET_NO_EN)],
+                       "default": pick(lang, BUDGET_NO, BUDGET_NO_EN)}
             self.ledger.append("user.question", None, payload)
             self._notify(f"Budget used up: {charter.title}", question_text(qid, payload))
         return spent >= budget
@@ -332,12 +345,20 @@ class Lab:
             self.ledger.append("lab.executor_notice", None, {"seq": e.seq})
             name = e.payload["executor"]
             fallback = self.kernel.fallbacks.get(name)
-            then = (f"受影响的工单已改由 {fallback} 执行。" if fallback in self.kernel.executors
-                    else "受影响的工单和主 Agent 先暂停，到时自动重试；也可以配置备用执行者"
-                         "（TARLAB_FALLBACK，例如 codex=devin）。")
+            lang = charter.chat_language
+            then = (pick(lang, f"受影响的工单已改由 {fallback} 执行。",
+                         f"Affected orders moved to {fallback}.")
+                    if fallback in self.kernel.executors else
+                    pick(lang, "受影响的工单和主 Agent 先暂停，到时自动重试；也可以配置备用执行者"
+                               "（TARLAB_FALLBACK，例如 codex=devin）。",
+                         "Affected orders and the main agent wait and retry then; a fallback "
+                         "executor can be configured (TARLAB_FALLBACK, e.g. codex=devin)."))
             until = datetime.fromisoformat(e.payload["until"])
-            self._notify(f"{name} 额度不足或被限流: {charter.title}",
-                         f"{name} 报错：{e.payload['error'][:300]}\n\n{until:%H:%M} UTC 后重试。{then}")
+            self._notify(pick(lang, f"{name} 额度不足或被限流: {charter.title}",
+                              f"{name} out of quota or rate limited: {charter.title}"),
+                         f"{name}: {e.payload['error'][:300]}\n\n"
+                         + pick(lang, f"{until:%H:%M} UTC 后重试。", f"Retry after {until:%H:%M} UTC. ")
+                         + then)
 
     def _has_pending(self) -> bool:
         return any(st.status in ("pending", "interrupted")
@@ -384,13 +405,20 @@ class Lab:
                 "degraded_seq": e.seq, "reason": e.payload["reason"], "silent": recent})
             noticed.append(notice)
             if not recent:
-                label = {"quota": "额度用完", "rate_limited": "持续限流",
-                         "unavailable": "无法连接"}.get(e.payload["reason"], e.payload["reason"])
+                lang = charter.chat_language
+                label = {"quota": pick(lang, "额度用完", "out of quota"),
+                         "rate_limited": pick(lang, "持续限流", "rate limited"),
+                         "unavailable": pick(lang, "无法连接", "unreachable")
+                         }.get(e.payload["reason"], e.payload["reason"])
                 self._notify(
                     f"Undermind {label}: {charter.title}",
                     f"Undermind {label}（{e.payload.get('tool')}）：{e.payload.get('detail', '')}"
-                    "\n\n文献检索已自动改用 OpenAlex、Semantic Scholar 和 arXiv；Agent 会在报告"
-                    "里注明来源。额度恢复或升级后无需操作，平台会自动重新使用 Undermind。")
+                    + pick(lang, "\n\n文献检索已自动改用 OpenAlex、Semantic Scholar 和 arXiv；"
+                                 "Agent 会在报告里注明来源。额度恢复或升级后无需操作，平台会自动"
+                                 "重新使用 Undermind。",
+                           "\n\nLiterature search switched to OpenAlex, Semantic Scholar and "
+                           "arXiv; agents name their sources in reports. Nothing to do: Undermind "
+                           "is used again once it recovers."))
 
     def _idle(self) -> LabStatus:
         since = max(self._last_seq("order.finished"), self._last_seq("user.reply"),
@@ -502,14 +530,20 @@ class Lab:
         qid = f"q{seq}-finish"
         if not any(e.payload["qid"] == qid for e in self._events("user.question")):
             payload = {"qid": qid, "kind": "approval", "purpose": "finish",
-                       "text": f"主 Agent 提议结束项目。\n\n{decision.final_summary}\n\n"
-                               "要结束吗？不结束的话，请写明希望继续做什么。",
-                       "options": [FINISH_YES, FINISH_NO], "default": FINISH_YES}
+                       "text": pick(charter.chat_language,
+                                    f"主 Agent 提议结束项目。\n\n{decision.final_summary}\n\n"
+                                    "要结束吗？不结束的话，请写明希望继续做什么。",
+                                    "The main agent proposes to finish the project.\n\n"
+                                    f"{decision.final_summary}\n\nFinish? If not, say what "
+                                    "to work on next."),
+                       "options": [pick(charter.chat_language, FINISH_YES, FINISH_YES_EN),
+                                   pick(charter.chat_language, FINISH_NO, FINISH_NO_EN)],
+                       "default": pick(charter.chat_language, FINISH_YES, FINISH_YES_EN)}
             self.ledger.append("user.question", None, payload)
             self._notify(f"Approval needed: finish {charter.title}?", question_text(qid, payload))
             return False
         reply = next((e for e in self._events("user.reply") if e.payload["qid"] == qid), None)
-        return reply is not None and reply.payload["answer"].strip() == FINISH_YES
+        return reply is not None and _confirms_finish(reply)
 
     def _topic_question(self, payload: dict[str, Any], charter: Charter
                         ) -> dict[str, Any] | None:
@@ -537,15 +571,20 @@ class Lab:
             self.ledger.append("lab.question_held", None,
                                {"qid": payload["qid"], "point": "topic", "problems": problems})
             return None
-        notes = []
+        lang, notes = charter.chat_language, []
         if not searched:
-            notes.append(f"注意：新颖性判断没有用深度检索（{unavailable or '主 Agent 未安排'}），"
-                         "只用了普通文献检索，可能漏掉相近工作。")
+            why = unavailable or pick(lang, "主 Agent 未安排", "the main agent did not run one")
+            notes.append(pick(lang, f"注意：新颖性判断没有用深度检索（{why}），只用了普通文献检索，"
+                                    "可能漏掉相近工作。",
+                              f"Note: the novelty check used no deep search ({why}), only "
+                              "ordinary literature search; close prior work may be missed."))
         if problems:
-            notes.append("平台检查未通过，主 Agent 补了两次仍未补齐，问题如下：\n"
+            notes.append(pick(lang, "平台检查未通过，主 Agent 补了两次仍未补齐，问题如下：\n",
+                              "Platform checks still fail after two attempts to fix them:\n")
                          + "\n".join(f"- {p}" for p in problems))
         parts = [summary[:SUMMARY_MAX_CHARS], *notes,
-                 f"详细材料：`{TOPIC_SUMMARY}`、`reports/topic_report.md`", "---", payload["text"]]
+                 pick(lang, "详细材料：", "Details: ")
+                 + f"`{TOPIC_SUMMARY}`, `reports/topic_report.md`", "---", payload["text"]]
         return {**payload, "asked": payload["text"],
                 "text": "\n\n".join(p for p in parts if p)}
 
@@ -567,11 +606,14 @@ class Lab:
 
     def _deep_search_unavailable(self, charter: Charter) -> str | None:
         if charter.max_deep_searches <= 0:
-            return "章程的深度检索额度为 0"
+            return pick(charter.chat_language, "章程的深度检索额度为 0",
+                        "the charter allows no deep searches")
         if not self._events("undermind.workspace"):
-            return "项目没有连接 Undermind"
+            return pick(charter.chat_language, "项目没有连接 Undermind",
+                        "the project has no Undermind connection")
         if self._events("undermind.degraded"):
-            return "Undermind 额度不足或无法连接"
+            return pick(charter.chat_language, "Undermind 额度不足或无法连接",
+                        "Undermind is out of quota or unreachable")
         return None
 
     def _apply_once(self, seq: int, decision: Decision, charter: Charter) -> None:
@@ -697,7 +739,7 @@ def _exclusive(order: WorkOrder) -> bool:
 
 def _confirms_finish(e: Event) -> bool:
     return (e.kind == "user.reply" and str(e.payload.get("qid", "")).endswith("-finish")
-            and str(e.payload.get("answer", "")).strip() == FINISH_YES)
+            and str(e.payload.get("answer", "")).strip() in (FINISH_YES, FINISH_YES_EN))
 
 
 def _brief(payload: Mapping[str, Any]) -> Any:

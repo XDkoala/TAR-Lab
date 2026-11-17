@@ -86,6 +86,11 @@ class ProjectState:
             tail = self._tails[path] = ActivityTail(path, self.project.workspace)
         return tail.poll()
 
+    def charter(self) -> Charter | None:
+        events = [e for e in self.ledger.events()
+                  if e.kind in ("project.charter", "project.charter_changed")]
+        return Charter.from_dict(events[-1].payload["charter"]) if events else None
+
     def model_of(self, executor: str) -> str:
         return self.models.get(executor, executor)
 
