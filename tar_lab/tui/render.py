@@ -32,6 +32,7 @@ STATUSES = {"running": "运行中", "pending": "排队中", "interrupted": "中�
             "limit_exceeded": "超限", "crashed": "崩溃", "cancelled": "已取消",
             "thinking": "思考中"}
 DETAIL_STEPS = 12
+DEGRADED = {"quota": "额度用完", "rate_limited": "持续限流", "unavailable": "无法连接"}
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 STEP_MARK = {"command": "$", "tool": "⚙", "edit": "✎", "note": "·", "search": "⌕"}
 
@@ -136,6 +137,13 @@ def toolbar(view: ProjectView | None, runner_alive: bool, width: int) -> Fragmen
             ("class:dim", (f" · ≈${view.spent_usd:.2f}/${view.budget_usd:g}"
              f" · {view.elapsed_h:.1f}h/{view.deadline_h:g}h"
              f" · 深搜 {view.deep_used}/{view.deep_max}"))]
+    if view.undermind_calls or view.literature_calls:
+        errors = f"，错 {view.undermind_errors}" if view.undermind_errors else ""
+        out.append(("class:dim", f" · 文献 Undermind {view.undermind_calls}{errors}"
+                    + (f" / 开放源 {view.literature_calls}" if view.literature_calls else "")))
+    if view.degraded:
+        label = DEGRADED.get(view.degraded, view.degraded)
+        out.append(("class:warn", f" · Undermind {label}，已改用开放文献源"))
     if view.gpu is not None:
         out.append(("class:dim", (f" · GPU {view.gpu.util_percent}% "
                     f"{view.gpu.used_mib / 1024:.1f}/{view.gpu.total_mib / 1024:.0f}G")))
@@ -223,6 +231,11 @@ def feed_item(e: Event, orders: Mapping[str, OrderState]) -> RenderableType | No
     if e.kind == "project.finished":
         return Group(Text("● 项目完成", style="bold green") + stamp,
                      Padding(Markdown(str(p.get("summary", "")), hyperlinks=False), (0, 0, 0, 2)))
+    if e.kind == "undermind.degraded":
+        reason = DEGRADED.get(str(p.get("reason")), str(p.get("reason")))
+        return Group(Text(f"● Undermind {reason}，已改用 OpenAlex / Semantic Scholar / arXiv",
+                          style="bold yellow") + stamp,
+                     _sub(clip(str(p.get("detail", "")), 300)))
     if e.kind == "lab.deadline":
         return Text("● 已到截止时间，主 Agent 开始收尾", style="bold yellow") + stamp
     if e.kind == "lab.error":

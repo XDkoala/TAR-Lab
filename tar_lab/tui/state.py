@@ -21,6 +21,7 @@ from .system import GpuInfo
 MAIN_AGENT = "main"
 # A decision directory untouched this long belongs to a runner that died mid-decision.
 STALE_DECISION_SECONDS = 600
+DEGRADED_SHOWN_SECONDS = 3600
 
 
 @dataclass
@@ -56,6 +57,10 @@ class ProjectView:
     unread: int
     orders: dict[str, OrderState] = field(default_factory=dict)
     gpu: GpuInfo | None = None
+    undermind_calls: int = 0
+    undermind_errors: int = 0
+    literature_calls: int = 0
+    degraded: str | None = None  # reason, while Undermind trouble is recent
 
 
 def _now() -> datetime:
@@ -167,6 +172,11 @@ class ProjectState:
         deep = sum(1 for e in by_kind.get("undermind.call", [])
                    if e.payload.get("tool") == "launch_deep_search"
                    and not e.payload.get("is_error"))
+        um = by_kind.get("undermind.call", [])
+        degraded = by_kind.get("undermind.degraded", [])
+        recent = degraded and (self.clock() - degraded[-1].ts).total_seconds() < \
+            DEGRADED_SHOWN_SECONDS and not any(
+                e.seq > degraded[-1].seq and not e.payload.get("is_error") for e in um)
         return ProjectView(
             title=charter.title if charter else self.project.root.name,
             phase=phase,
@@ -181,4 +191,8 @@ class ProjectState:
             unread=sum(1 for e in by_kind.get("user.message", []) if e.seq > last_decision),
             orders=orders,
             gpu=gpu,
+            undermind_calls=len(um),
+            undermind_errors=sum(1 for e in um if e.payload.get("is_error")),
+            literature_calls=len(by_kind.get("literature.call", [])),
+            degraded=str(degraded[-1].payload["reason"]) if recent else None,
         )

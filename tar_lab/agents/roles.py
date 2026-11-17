@@ -50,7 +50,13 @@ _TOOL_NOTES = {
                   "reading (`read_pdfs`), and deep search (`launch_deep_search`, small "
                   "per-project quota). Its tools may be loaded lazily: search your tools for "
                   "`undermind` and call `get_orientation` first. It is your primary literature "
-                  "source; do not conclude it is unavailable without trying it."),
+                  "source; do not conclude it is unavailable without trying it. If it reports "
+                  "a quota, rate limit or outage, switch to the `literature` server and say so "
+                  "in your report."),
+    "literature": ("The `literature` MCP server searches OpenAlex, Semantic Scholar and arXiv "
+                   "(`search_papers`, `get_paper`, `find_citations`); results include DOIs, "
+                   "arXiv ids and open-access PDF links you can download. Use it when "
+                   "Undermind is unavailable, and to cross-check citations."),
 }
 
 

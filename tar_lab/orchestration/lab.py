@@ -32,6 +32,7 @@ REMINDER_HOURS = (1.0, 4.0, 12.0, 24.0)
 MAX_ORDER_MINUTES = 90.0
 MAX_IDLE_WAKES = 3
 MAX_DECISION_ERRORS = 3
+LITERATURE_ALERT_HOURS = 6.0
 
 
 def _now() -> datetime:
@@ -165,6 +166,7 @@ class Lab:
         if self._timers(charter) == "suspended":
             return "suspended"
         self._check_deadline(charter)
+        self._literature_alerts(charter)
         if busy:
             return self._decide(charter) if self._urgent_message() else "busy"
         if self._pause_requested():
@@ -231,6 +233,27 @@ class Lab:
             self.ledger.append("lab.deadline", None, {"deadline_hours": charter.deadline_hours})
             self._notify("Deadline reached",
                                  f"{charter.title}: the main agent must now wrap up.")
+
+    def _literature_alerts(self, charter: Charter) -> None:
+        """Tell the user once per kind of Undermind trouble within ``LITERATURE_ALERT_HOURS``."""
+        noticed = self._events("lab.literature_notice")
+        for e in self._events("undermind.degraded"):
+            if any(n.payload["degraded_seq"] == e.seq for n in noticed):
+                continue
+            recent = any(n.payload["reason"] == e.payload["reason"]
+                         and (e.ts - n.ts).total_seconds() < LITERATURE_ALERT_HOURS * 3600
+                         for n in noticed)
+            notice = self.ledger.append("lab.literature_notice", None, {
+                "degraded_seq": e.seq, "reason": e.payload["reason"], "silent": recent})
+            noticed.append(notice)
+            if not recent:
+                label = {"quota": "额度用完", "rate_limited": "持续限流",
+                         "unavailable": "无法连接"}.get(e.payload["reason"], e.payload["reason"])
+                self._notify(
+                    f"Undermind {label}: {charter.title}",
+                    f"Undermind {label}（{e.payload.get('tool')}）：{e.payload.get('detail', '')}"
+                    "\n\n文献检索已自动改用 OpenAlex、Semantic Scholar 和 arXiv；Agent 会在报告"
+                    "里注明来源。额度恢复或升级后无需操作，平台会自动重新使用 Undermind。")
 
     def _idle(self) -> LabStatus:
         since = max(self._last_seq("order.finished"), self._last_seq("user.reply"),
@@ -387,6 +410,14 @@ class Lab:
         if replies_out:
             lines.append("## Your earlier messages to the user")
             lines += [f"- {e.payload['text'][:600]}" for e in replies_out[-5:]]
+        degraded = self._events("undermind.degraded")
+        if degraded:
+            last = degraded[-1]
+            detail = str(last.payload.get("detail"))[:200]
+            lines += ["## Literature tools",
+                      (f"Undermind degraded {len(degraded)} time(s); latest at {last.ts:%H:%M} "
+                       f"UTC: {last.payload['reason']} ({detail}). Agents fall back to the "
+                       "`literature` server (OpenAlex, Semantic Scholar, arXiv).")]
         reports = self.kernel.project.workspace / "reports"
         files = sorted(p.name for p in reports.iterdir()) if reports.is_dir() else []
         lines += ["## Files", f"workspace: {self.kernel.project.workspace}",

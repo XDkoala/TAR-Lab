@@ -108,3 +108,84 @@ def test_codex_mcp_config_flags() -> None:
     assert flags[1] == 'mcp_servers.undermind.command="/py"'
     assert flags[3] == 'mcp_servers.undermind.args=["-m", "x"]'
     assert flags[5] == 'mcp_servers.undermind.env={HOME = "/h"}'
+
+
+class FlakyClient(FakeClient):
+    """Replies with scripted texts (errors unless the text is "ok") or raises."""
+
+    def __init__(self, scope: ProxyScope, replies: list[str | Exception]) -> None:
+        super().__init__(scope)
+        self.replies = replies
+
+    async def call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+        self.calls.append((name, arguments))
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return types.CallToolResult(content=[types.TextContent(type="text", text=reply)],
+                                    is_error=reply != "ok")
+
+
+def flaky(tmp_path: Path, replies: list[str | Exception]) -> tuple[UndermindProxy, FlakyClient]:
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    scope = ProxyScope(ledger.path, "o4-1-researcher", "ws-123", 1)
+    client = FlakyClient(scope, replies)
+    return UndermindProxy(client, scope, retry_delays=(0, 0)), client  # type: ignore[arg-type]
+
+
+def _text(r: types.CallToolResult) -> str:
+    return r.content[0].text  # type: ignore[union-attr]
+
+
+def test_rate_limit_is_retried_then_succeeds(tmp_path: Path) -> None:
+    proxy, client = flaky(tmp_path, ["error: rate_limited", "ok"])
+    result = anyio.run(proxy.call, "get_orientation", {})
+    assert not result.is_error and len(client.calls) == 2
+    [call] = [e for e in proxy.ledger.events() if e.kind == "undermind.call"]
+    assert call.payload["retries"] == 1 and call.payload["outcome"] == "ok"
+    assert not [e for e in proxy.ledger.events() if e.kind == "undermind.degraded"]
+
+
+def test_persistent_rate_limit_degrades_to_open_sources(tmp_path: Path) -> None:
+    proxy, client = flaky(tmp_path, ["429 Too Many Requests"] * 3)
+    result = anyio.run(proxy.call, "get_orientation", {})
+    assert result.is_error and "`literature` MCP server" in _text(result)
+    assert len(client.calls) == 3
+    [d] = [e for e in proxy.ledger.events() if e.kind == "undermind.degraded"]
+    assert d.payload["reason"] == "rate_limited" and d.order_id == "o4-1-researcher"
+
+
+def test_quota_error_stops_calls_for_the_cooldown(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from tar_lab.integrations.undermind.proxy import QUOTA_COOLDOWN, degraded_until
+
+    proxy, client = flaky(tmp_path, ["Monthly search quota reached. Upgrade to Pro."])
+
+    async def scenario() -> tuple[types.CallToolResult, types.CallToolResult]:
+        return (await proxy.call("search_papers", {"sample_abstract": "x"}),
+                await proxy.call("search_papers", {"sample_abstract": "y"}))
+
+    first, second = anyio.run(scenario)
+    assert "out of quota" in _text(first) and "retries it after" in _text(second)
+    assert len(client.calls) == 1  # the second call never reached Undermind
+    until = degraded_until(proxy.ledger)
+    assert until is not None
+    assert degraded_until(proxy.ledger, until + QUOTA_COOLDOWN) is None
+    assert until > datetime.now(UTC)
+
+
+def test_transport_failure_degrades_instead_of_crashing(tmp_path: Path) -> None:
+    proxy, _ = flaky(tmp_path, [ConnectionError("network is unreachable")])
+    result = anyio.run(proxy.call, "get_orientation", {})
+    assert result.is_error and "unreachable" in _text(result)
+    kinds = [(e.kind, e.payload.get("reason") or e.payload.get("outcome"))
+             for e in proxy.ledger.events()]
+    assert kinds == [("undermind.call", "unavailable"), ("undermind.degraded", "unavailable")]
+
+
+def test_ordinary_tool_errors_do_not_degrade(tmp_path: Path) -> None:
+    proxy, _ = flaky(tmp_path, ["paper Smi98 not found"])
+    result = anyio.run(proxy.call, "get_orientation", {})
+    assert result.is_error and _text(result) == "paper Smi98 not found"
+    assert not [e for e in proxy.ledger.events() if e.kind == "undermind.degraded"]

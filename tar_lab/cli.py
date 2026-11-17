@@ -143,14 +143,20 @@ _PROXY_ENV = ("HOME", "PATH", "USER", "LANG", "LC_ALL", "http_proxy", "https_pro
 
 def _mcp_hook(ledger: Ledger) -> McpHook:
     def mcp_for(order: WorkOrder) -> dict[str, McpServer]:
-        has_workspace = any(e.kind == "undermind.workspace" for e in ledger.events())
-        if order.role not in LITERATURE_ROLES or not has_workspace:
+        if order.role not in LITERATURE_ROLES:
             return {}
         env = {k: v for k, v in os.environ.items()
-               if k in _PROXY_ENV or k.startswith("TARLAB_UNDERMIND_")}
-        args = ("-m", "tar_lab.cli", "undermind", "serve", "--ledger", str(ledger.path),
-                "--order", order.id)
-        return {"undermind": McpServer(sys.executable, args, env)}
+               if k in _PROXY_ENV or k.startswith(("TARLAB_UNDERMIND_", "TARLAB_OPENALEX_",
+                                                    "TARLAB_S2_"))
+               or k == "SEMANTIC_SCHOLAR_API_KEY"}
+        scope = ("--ledger", str(ledger.path), "--order", order.id)
+        servers = {}
+        if any(e.kind == "undermind.workspace" for e in ledger.events()):
+            servers["undermind"] = McpServer(
+                sys.executable, ("-m", "tar_lab.cli", "undermind", "serve", *scope), env)
+        servers["literature"] = McpServer(
+            sys.executable, ("-m", "tar_lab.cli", "literature", "serve", *scope), env)
+        return servers
     return mcp_for
 
 
@@ -337,6 +343,16 @@ def build_parser() -> argparse.ArgumentParser:
     um.add_parser("workspace", help="create the project's Undermind workspace").add_argument(
         "project", type=Path)
 
+    lit = groups.add_parser("literature", help="open literature sources (Undermind fallback)"
+                            ).add_subparsers(dest="command", required=True)
+    lit_serve = lit.add_parser("serve", help="stdio MCP server for agents")
+    lit_serve.add_argument("--ledger", type=Path)
+    lit_serve.add_argument("--order")
+    lit_search = lit.add_parser("search", help="search OpenAlex, Semantic Scholar and arXiv")
+    lit_search.add_argument("query")
+    lit_search.add_argument("--limit", type=int, default=10)
+    lit_search.add_argument("--year-from", type=int)
+
     engine = groups.add_parser("engine", help="AI-Scientist-v3 engine").add_subparsers(
         dest="command", required=True)
     summary = engine.add_parser("summary", help="summarize a run directory")
@@ -423,6 +439,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.group == "order":
         return _order_command(args)
+    if args.group == "literature":
+        from .integrations.literature import Literature
+        from .integrations.literature.server import run_stdio as literature_stdio
+
+        if args.command == "serve":
+            literature_stdio(args.ledger, args.order)
+            return 0
+        _print_json(anyio.run(Literature().search, args.query, args.limit, args.year_from))
+        return 0
     if args.group == "tex":
         result = build_tex(args.paper_dir, args.main)
         print(f"PDF: {result.pdf}" if result.pdf else f"Build failed; see {result.log}")

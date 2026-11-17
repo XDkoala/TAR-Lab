@@ -312,3 +312,19 @@ def test_charter_change_applied_once_with_validation(tmp_path: Path) -> None:
     assert len(events) == 1 and events[0].payload["rejected"] == [
         {"field": "on_timeout", "value": "explode"}]
     assert sent.count("Message from the main agent: Tiny world model") == 1
+
+
+def test_undermind_trouble_is_notified_once_and_given_to_the_main_agent(tmp_path: Path
+                                                                         ) -> None:
+    model = FakeModel([decision(), decision()])
+    lab, sent = make_lab(tmp_path, model)
+    for reason in ("quota", "quota", "unavailable"):
+        lab.ledger.append("undermind.degraded", "o1-1-researcher",
+                          {"reason": reason, "tool": "search_papers", "detail": "quota reached"})
+    lab.step()
+    lab.step()
+    alerts = [s for s in sent if s.startswith("Undermind")]
+    assert alerts == ["Undermind 额度用完: Tiny world model", "Undermind 无法连接: Tiny world model"]
+    notices = lab._events("lab.literature_notice")
+    assert [n.payload["silent"] for n in notices] == [False, True, False]
+    assert "## Literature tools" in model.prompts[-1] and "unavailable" in model.prompts[-1]

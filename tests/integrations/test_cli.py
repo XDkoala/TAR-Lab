@@ -33,3 +33,21 @@ def test_engine_summary_exit_code(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert main(["engine", "summary", str(tmp_path)]) == 0
     assert json.loads(capsys.readouterr().out)["completed"] is True
     assert main(["engine", "summary", str(tmp_path / "missing")]) == 1
+
+
+def test_literature_roles_always_get_the_open_sources(tmp_path: Path) -> None:
+    from tar_lab.cli import _mcp_hook
+    from tar_lab.core.ledger import Ledger
+    from tar_lab.core.workorder import Limits, WorkOrder
+
+    ledger = Ledger(tmp_path / "l.sqlite")
+    hook = _mcp_hook(ledger)
+
+    def order(role: str) -> WorkOrder:
+        return WorkOrder(f"o1-1-{role}", role, "codex", "g", (), "ok", Limits(60))
+    assert set(hook(order("researcher"))) == {"literature"}  # no Undermind workspace yet
+    assert hook(order("engineer")) == {}
+    ledger.append("undermind.workspace", None, {"workspace_id": "ws"})
+    servers = hook(order("reviewer"))
+    assert set(servers) == {"undermind", "literature"}
+    assert servers["literature"].args[:4] == ("-m", "tar_lab.cli", "literature", "serve")

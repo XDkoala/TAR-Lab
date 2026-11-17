@@ -295,3 +295,20 @@ def test_new_project_intake_in_the_terminal(tmp_path: Path) -> None:
     assert answers == ["世界模型论文", "$50", "ICLR workshop"]
     assert root is not None and created == [root] and root.parent == tmp_path / "projects"
     assert "小型世界模型" in out.getvalue()
+
+
+def test_toolbar_shows_literature_use_and_undermind_trouble(project: Path) -> None:
+    ledger = Ledger(project / "ledger.sqlite")
+    ledger.append("undermind.call", "o1-1-researcher", {"tool": "search_papers",
+                                                        "is_error": False})
+    ledger.append("undermind.call", "o1-1-researcher", {"tool": "search_papers",
+                                                        "is_error": True})
+    ledger.append("undermind.degraded", "o1-1-researcher",
+                  {"reason": "quota", "tool": "search_papers", "detail": "quota reached"})
+    ledger.append("literature.call", "o1-1-researcher", {"tool": "search_papers"})
+    ledger.close()
+    state = _state(project)
+    view = state.snapshot()
+    bar = "".join(t for _, t in render.toolbar(view, runner_alive=True, width=200))
+    assert "文献 Undermind 2，错 1 / 开放源 1" in bar and "额度用完，已改用开放文献源" in bar
+    state.close()
