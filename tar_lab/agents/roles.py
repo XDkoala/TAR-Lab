@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from tar_lab.core.workorder import WorkOrder
@@ -43,13 +44,31 @@ _PERMISSIONS = {
 }
 
 
-def render_prompt(order: WorkOrder, *, resume: bool = False) -> str:
+_TOOL_NOTES = {
+    "undermind": ("The `undermind` MCP server is attached to this session: literature "
+                  "search (`search_papers`), paper metadata (`get_paper_info`), full-text PDF "
+                  "reading (`read_pdfs`), and deep search (`launch_deep_search`, small "
+                  "per-project quota). Its tools may be loaded lazily: search your tools for "
+                  "`undermind` and call `get_orientation` first. It is your primary literature "
+                  "source; do not conclude it is unavailable without trying it."),
+}
+
+
+def tool_notes(servers: Sequence[str]) -> str:
+    notes = [_TOOL_NOTES.get(s, f"The `{s}` MCP server is attached to this session.")
+             for s in servers]
+    return "\n".join(f"- {n}" for n in notes)
+
+
+def render_prompt(order: WorkOrder, *, resume: bool = False,
+                  mcp_servers: Sequence[str] = ()) -> str:
     role = ROLES[order.role]
+    tools = ["", "## Tools", tool_notes(mcp_servers)] if mcp_servers else []
     if resume:
-        return (
-            f"You were interrupted while working on work order {order.id}. Inspect the current "
+        return "\n".join([
+            (f"You were interrupted while working on work order {order.id}. Inspect the current "
             "workspace state, continue from where you stopped, and finish the order as "
-            "originally specified. Reply with the same final JSON report.")
+            "originally specified. Reply with the same final JSON report."), *tools])
     lines = [
         f"# Work order {order.id} ({role.name})",
         role.brief,
@@ -70,6 +89,7 @@ def render_prompt(order: WorkOrder, *, resume: bool = False) -> str:
     ]
     if order.inputs:
         lines += ["", "## Inputs", *[f"- {i}" for i in order.inputs]]
+    lines += tools
     if role.name in GUIDES:
         lines += ["", "## How to work", GUIDES[role.name]]
     if order.require_sources:

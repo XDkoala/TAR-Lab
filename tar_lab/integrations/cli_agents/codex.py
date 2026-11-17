@@ -82,7 +82,8 @@ class CodexExecutor:
         d.mkdir(parents=True, exist_ok=True)
         schema, last, prompt = d / "schema.json", d / "last_message.json", d / "prompt.md"
         schema.write_text(json.dumps(RESULT_SCHEMA))
-        prompt.write_text(render_prompt(attempt.order, resume=attempt.resume_session is not None))
+        prompt.write_text(render_prompt(attempt.order, resume=attempt.resume_session is not None,
+                                         mcp_servers=list(attempt.mcp_servers)))
         last.unlink(missing_ok=True)
         state: dict[str, Any] = {"session": attempt.resume_session, "usage": Usage(),
                                  "error": None}
