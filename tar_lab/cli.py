@@ -33,7 +33,7 @@ from .integrations.undermind import (
 from .integrations.undermind.proxy import create_project_workspace, run_stdio
 from .orchestration.kernel import Kernel, McpHook, Project
 from .orchestration.lab import Lab, question_text
-from .orchestration.notify import default_notifier
+from .orchestration.notify import NotificationError, default_notifier
 from .tools.tex import build as build_tex
 
 
@@ -378,7 +378,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"PDF: {result.pdf}" if result.pdf else f"Build failed; see {result.log}")
         return 0 if result.pdf else 1
     if args.group == "notify-test":
-        default_notifier().notify("Test notification", "TAR-Lab can reach you here.")
+        try:
+            default_notifier().notify("Test notification", "TAR-Lab can reach you here.")
+        except NotificationError as exc:
+            print(f"Notification failed: {exc}\nAn SSL/EOF error usually means a proxy (e.g. "
+                  "Clash in global/TUN mode) is routing SMTP through a node that blocks mail "
+                  "ports; send the SMTP host directly.", file=sys.stderr)
+            return 1
         print("Sent.")
         return 0
     if args.group in ("new", "run", "status", "inbox", "reply", "resume"):
