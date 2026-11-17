@@ -97,7 +97,7 @@
 
 - Codex CLI、Devin CLI：子进程调用（Devin 支持 `-p`、`--resume`、`--export`）。
 - 模型 API：自有工具调用循环，接入 MCP。
-- AI-Scientist 引擎：原版（`engines/ai-scientist-v3-original`，固定在上游提交，只用于基线对比）和改造版（`engines/ai-scientist-v3`）各包装一个。
+- AI-Scientist 引擎：原版（`engines/ai-scientist-v3-original`，与上游 `df83138` 的目录树逐字节一致，只用于基线对比，有自己的 `.venv`）和改造版（`engines/ai-scientist-v3`）各包装一个：执行者 `ai-scientist-original` 和 `ai-scientist`（`tar_lab/integrations/ai_scientist/executor.py`）。工单的 `params` 传入 `task_dir`、`model`、`phases` 和 `overrides`。目前每次尝试都是一次全新的引擎运行；引擎自带的续跑（`paths.run_dir`）还没有接入。`tarlab engine compare` 用来比较多个运行的最终得分、花费和耗时。
 - 以后：服务器、机器人、人工实验员（工单以邮件发给人，人回填数据）。
 
 ### 权限闸门（`tools`）

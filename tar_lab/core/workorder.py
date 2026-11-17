@@ -32,6 +32,8 @@ class WorkOrder:
     inputs: tuple[str, ...] = ()
     permission: Permission = "small"
     require_sources: bool = True
+    # Executor-specific settings, e.g. the engine task directory and overrides.
+    params: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -42,6 +44,7 @@ class WorkOrder:
         fields["limits"] = Limits(**fields["limits"])
         fields["deliverables"] = tuple(fields["deliverables"])
         fields["inputs"] = tuple(fields.get("inputs", ()))
+        fields["params"] = dict(fields.get("params", {}))
         return cls(**fields)
 
 
@@ -72,6 +75,8 @@ class WorkResult:
     session_id: str | None = None
     wall_seconds: float = 0.0
     error: str | None = None
+    # Dollar estimate where the executor can price its own calls (e.g. the engine).
+    cost_usd: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

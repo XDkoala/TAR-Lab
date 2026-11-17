@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ class RunSummary:
     investigation_outcome: str | None = None
     paper_pdf: Path | None = None
     estimated_cost_usd: float | None = None
+    wall_seconds: float | None = None
+    """Sum of ``pipeline_start`` → ``pipeline_end`` spans over all sessions of the run."""
 
     @property
     def completed(self) -> bool:
@@ -65,9 +68,17 @@ def load_run(run_dir: Path) -> RunSummary:
     status: str | None = None
     phases: dict[str, PhaseResult] = {}
     cost: float | None = None
+    wall: float | None = None
+    started: datetime | None = None
     for event in _events(run_dir / "pipeline_events.jsonl"):
         fields = event.get("fields") or {}
         kind = event.get("event")
+        ts = _timestamp(event)
+        if kind == "pipeline_start":
+            started = ts
+        elif kind == "pipeline_end" and started is not None and ts is not None:
+            wall = (wall or 0.0) + (ts - started).total_seconds()
+            started = None
         if kind == "phase_end" and fields.get("phase_name"):
             name = str(fields["phase_name"])
             phases[name] = PhaseResult(
@@ -90,4 +101,12 @@ def load_run(run_dir: Path) -> RunSummary:
         investigation_outcome=completion.get("outcome"),
         paper_pdf=pdf if pdf.is_file() else None,
         estimated_cost_usd=cost,
+        wall_seconds=wall,
     )
+
+
+def _timestamp(event: dict[str, Any]) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(event["timestamp"]))
+    except (KeyError, ValueError):
+        return None

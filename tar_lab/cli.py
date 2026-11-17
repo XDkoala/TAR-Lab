@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -16,7 +17,7 @@ import anyio
 
 from .core.ledger import Ledger, OrderState
 from .core.workorder import Executor, Limits, WorkOrder
-from .integrations.ai_scientist import load_run
+from .integrations.ai_scientist import AIScientistEngine, AIScientistExecutor, load_run
 from .integrations.cli_agents.codex import CodexExecutor
 from .integrations.cli_agents.devin import DevinExecutor
 from .integrations.undermind import (
@@ -83,6 +84,20 @@ def _undermind_status(settings: UndermindSettings) -> int:
     return 0
 
 
+def _engine_compare(run_dirs: Sequence[Path]) -> int:
+    rows = []
+    for run_dir in run_dirs:
+        summary = load_run(run_dir)
+        best = summary.best_program or {}
+        rows.append({"run_dir": str(run_dir), "status": summary.status,
+                     "combined_score": best.get("combined_score"), "correct": best.get("correct"),
+                     "cost_usd": summary.estimated_cost_usd,
+                     "wall_minutes": round(summary.wall_seconds / 60, 1)
+                     if summary.wall_seconds is not None else None})
+    _print_json(rows)
+    return 0
+
+
 def _engine_summary(run_dir: Path) -> int:
     summary = load_run(run_dir)
     data = asdict(summary)
@@ -91,8 +106,23 @@ def _engine_summary(run_dir: Path) -> int:
     return 0 if summary.completed else 1
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _engine(name: str) -> AIScientistEngine:
+    workspace = REPO_ROOT.parent
+    runs = Path(os.environ.get("TARLAB_RUNS_DIR") or workspace / "runs")
+    return AIScientistEngine(REPO_ROOT / "engines" / name, runs, workspace / ".tools" / "node")
+
+
 def _executors() -> dict[str, Executor]:
-    return {"codex": CodexExecutor(), "devin": DevinExecutor()}
+    return {
+        "codex": CodexExecutor(),
+        "devin": DevinExecutor(),
+        "ai-scientist": AIScientistExecutor(_engine("ai-scientist-v3")),
+        "ai-scientist-original": AIScientistExecutor(
+            _engine("ai-scientist-v3-original"), name="ai-scientist-original"),
+    }
 
 
 def _print_attention(kind: str, state: OrderState) -> None:
@@ -110,9 +140,18 @@ def _kernel(root: Path) -> Kernel:
 def _order_command(args: argparse.Namespace) -> int:
     kernel = _kernel(args.project)
     if args.command == "add":
+        params = {}
+        for item in args.param:
+            key, sep, value = item.partition("=")
+            if not sep:
+                raise SystemExit(f"--param expects KEY=JSON, got {item!r}")
+            try:
+                params[key] = json.loads(value)
+            except json.JSONDecodeError:
+                params[key] = value
         kernel.submit(WorkOrder(
             args.id, args.role, args.executor, args.goal, tuple(args.deliverable),
-            args.acceptance, Limits(int(args.minutes * 60), args.max_tokens)))
+            args.acceptance, Limits(int(args.minutes * 60), args.max_tokens), params=params))
         return 0
     if args.command == "run":
         kernel.run_pending()
@@ -124,6 +163,7 @@ def _order_command(args: argparse.Namespace) -> int:
     _print_json({oid: {"status": s.status, "attempts": s.attempts,
                        "used_seconds": round(s.used_seconds, 1), "session_id": s.session_id,
                        "usage": asdict(s.usage),
+                       "cost_usd": s.result.cost_usd if s.result else None,
                        "summary": s.result.summary if s.result else None}
                  for oid, s in states.items()})
     return 0
@@ -154,6 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command", required=True)
     summary = engine.add_parser("summary", help="summarize a run directory")
     summary.add_argument("run_dir", type=Path)
+    compare = engine.add_parser("compare", help="final score, cost and time of several runs")
+    compare.add_argument("run_dirs", type=Path, nargs="+")
 
     project = groups.add_parser("project", help="research projects").add_subparsers(
         dest="command", required=True)
@@ -172,6 +214,8 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--acceptance", default="The deliverables exist and work.")
     add.add_argument("--minutes", type=float, default=10)
     add.add_argument("--max-tokens", type=int)
+    add.add_argument("--param", action="append", default=[],
+                     help="executor setting KEY=JSON (plain strings need no quotes)")
     for name, help_text in (("run", "run pending orders, resuming interrupted ones"),
                             ("status", "show order states")):
         order.add_parser(name, help=help_text).add_argument("project", type=Path)
@@ -186,6 +230,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # The SDK logs a traceback for every failed OAuth flow; the CLI reports the error itself.
     logging.getLogger("mcp.client.auth").setLevel(logging.CRITICAL)
     if args.group == "engine":
+        if args.command == "compare":
+            return _engine_compare(args.run_dirs)
         return _engine_summary(args.run_dir)
     if args.group == "project":
         project = Project(args.project)
