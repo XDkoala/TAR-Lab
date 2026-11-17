@@ -360,3 +360,53 @@ def test_finish_question_times_out_to_the_charter_default(tmp_path: Path) -> Non
     lab.step()
     clock.offset = timedelta(hours=73)  # CHARTER: on_timeout "default", default is "yes"
     assert lab.step() == "finished"
+
+
+TOPIC = {**APPROVAL, "point": "topic"}
+
+
+def write_summary(lab: Lab, text: str = "我们要做什么：……") -> None:
+    reports = lab.kernel.project.workspace / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "topic_summary.md").write_text(text, encoding="utf-8")
+
+
+def test_topic_approval_waits_for_summary_and_deep_search(tmp_path: Path) -> None:
+    model = FakeModel([decision(ask=[TOPIC]), decision(ask=[TOPIC])])
+    lab, sent = make_lab(tmp_path, model)
+    lab.ledger.append("undermind.workspace", None, {"workspace_id": "w", "title": "t"})
+    lab.step()
+    assert not lab.questions() and not any(s.startswith("Approval") for s in sent)
+    [held] = lab._events("lab.question_held")
+    assert len(held.payload["problems"]) == 2
+
+    write_summary(lab)
+    lab.ledger.append("undermind.call", "o1-1-researcher",
+                      {"tool": "launch_deep_search", "is_error": False})
+    lab.step()  # the hold woke the main agent, which asks again
+    assert "Questions held back" in model.prompts[-1] and "topic_summary.md" in model.prompts[-1]
+    [(qid, q)] = lab.questions().items()
+    assert q.payload["text"].startswith("我们要做什么") and q.payload["text"].endswith("Pick topic?")
+    assert "深度检索" not in q.payload["text"]
+    assert "Approval needed: Tiny world model" in sent
+    charter = lab.charter()
+    assert charter is not None
+    assert f"{qid} [approval] Pick topic? -> (open)" in lab.context(charter)
+
+
+def test_topic_approval_says_when_deep_search_was_impossible(tmp_path: Path) -> None:
+    lab, _ = make_lab(tmp_path, FakeModel([decision(ask=[TOPIC])]))  # no Undermind workspace
+    write_summary(lab)
+    lab.step()
+    [(_, q)] = lab.questions().items()
+    assert "没有用深度检索（项目没有连接 Undermind）" in q.payload["text"]
+
+
+def test_topic_approval_goes_out_with_warnings_after_two_holds(tmp_path: Path) -> None:
+    lab, _ = make_lab(tmp_path, FakeModel([decision(ask=[TOPIC])] * 3))
+    lab.step()
+    lab.step()
+    assert not lab.questions() and len(lab._events("lab.question_held")) == 2
+    lab.step()
+    [(_, q)] = lab.questions().items()
+    assert "平台检查未通过" in q.payload["text"] and "topic_summary.md" in q.payload["text"]

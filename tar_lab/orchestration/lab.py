@@ -26,7 +26,7 @@ from .notify import ConsoleNotifier, NotificationError, Notifier
 LabStatus = Literal["intake", "working", "busy", "waiting", "error", "finished", "suspended"]
 WAKE = frozenset({"project.charter", "project.resumed", "order.finished", "order.cancelled",
                   "user.reply", "user.message", "order.over_budget", "lab.idle",
-                  "lab.deadline"})
+                  "lab.deadline", "lab.question_held"})
 BUSY_POLL_SECONDS = 5.0
 REMINDER_HOURS = (1.0, 4.0, 12.0, 24.0)
 MAX_ORDER_MINUTES = 90.0
@@ -35,6 +35,10 @@ MAX_DECISION_ERRORS = 3
 LITERATURE_ALERT_HOURS = 6.0
 FINISH_YES = "确认结束项目"
 FINISH_NO = "不结束，继续工作（请写明方向）"
+TOPIC_SUMMARY = "reports/topic_summary.md"
+SUMMARY_MAX_CHARS = 4000
+MAX_TOPIC_HOLDS = 2
+DEEP_SEARCH = "launch_deep_search"
 
 
 def _now() -> datetime:
@@ -342,12 +346,16 @@ class Lab:
                 oid, o["role"], self.tiers[ROLES[o["role"]].tier], o["goal"],
                 tuple(o["deliverables"]), o["acceptance"], Limits(int(minutes * 60)),
                 inputs=tuple(o["inputs"])))
-        asked = {e.payload["qid"] for e in self._events("user.question")}
+        asked = {e.payload["qid"] for e in self._events("user.question", "lab.question_held")}
         for i, q in enumerate(decision.ask_user, 1):
             qid = f"q{ev.seq}-{i}"
             if qid in asked:
                 continue
-            payload = {"qid": qid, **q}
+            payload: dict[str, Any] | None = {"qid": qid, **q}
+            if q.get("point") == "topic":
+                payload = self._topic_question({"qid": qid, **q}, charter)
+            if payload is None:
+                continue
             self.ledger.append("user.question", None, payload)
             subject = "Approval needed" if q["kind"] == "approval" else "Question"
             self._notify(f"{subject}: {charter.title}", question_text(qid, payload))
@@ -368,6 +376,53 @@ class Lab:
             return False
         reply = next((e for e in self._events("user.reply") if e.payload["qid"] == qid), None)
         return reply is not None and reply.payload["answer"].strip() == FINISH_YES
+
+    def _topic_question(self, payload: dict[str, Any], charter: Charter
+                        ) -> dict[str, Any] | None:
+        """Put the plain-language summary in front of a topic approval, or hold the question
+        back (waking the main agent) while the summary or the novelty deep search is missing.
+        After ``MAX_TOPIC_HOLDS`` holds it goes out anyway, with the gaps stated."""
+        path = self.kernel.project.workspace / TOPIC_SUMMARY
+        summary = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+        problems = []
+        if not summary:
+            problems.append(f"`{TOPIC_SUMMARY}` is missing or empty: dispatch a writer order "
+                            "for the plain-language topic summary.")
+        elif len(summary) > SUMMARY_MAX_CHARS:
+            problems.append(f"`{TOPIC_SUMMARY}` has {len(summary)} characters; it must stay "
+                            f"under {SUMMARY_MAX_CHARS} (one page).")
+        searched = any(e.payload.get("tool") == DEEP_SEARCH and not e.payload.get("is_error")
+                       for e in self._events("undermind.call"))
+        unavailable = self._deep_search_unavailable(charter)
+        if not searched and unavailable is None:
+            problems.append("No Undermind deep search has been run: the novelty of the "
+                            "recommended topic needs one on its closest prior work "
+                            "(researcher or reviewer order).")
+        held = [e for e in self._events("lab.question_held") if e.payload.get("point") == "topic"]
+        if problems and len(held) < MAX_TOPIC_HOLDS:
+            self.ledger.append("lab.question_held", None,
+                               {"qid": payload["qid"], "point": "topic", "problems": problems})
+            return None
+        notes = []
+        if not searched:
+            notes.append(f"注意：新颖性判断没有用深度检索（{unavailable or '主 Agent 未安排'}），"
+                         "只用了普通文献检索，可能漏掉相近工作。")
+        if problems:
+            notes.append("平台检查未通过，主 Agent 补了两次仍未补齐，问题如下：\n"
+                         + "\n".join(f"- {p}" for p in problems))
+        parts = [summary[:SUMMARY_MAX_CHARS], *notes,
+                 f"详细材料：`{TOPIC_SUMMARY}`、`reports/topic_report.md`", "---", payload["text"]]
+        return {**payload, "asked": payload["text"],
+                "text": "\n\n".join(p for p in parts if p)}
+
+    def _deep_search_unavailable(self, charter: Charter) -> str | None:
+        if charter.max_deep_searches <= 0:
+            return "章程的深度检索额度为 0"
+        if not self._events("undermind.workspace"):
+            return "项目没有连接 Undermind"
+        if self._events("undermind.degraded"):
+            return "Undermind 额度不足或无法连接"
+        return None
 
     def _apply_once(self, seq: int, decision: Decision, charter: Charter) -> None:
         """Side effects that must happen once per decision, marked by ``decision_seq``."""
@@ -422,8 +477,8 @@ class Lab:
             r = replies.get(e.payload["qid"])
             answer = ("(open)" if r is None else
                       f"{r['answer']}{' (default taken: no reply in time)' if r['auto'] else ''}")
-            lines.append(f"- {e.payload['qid']} [{e.payload['kind']}] {e.payload['text'][:300]}"
-                         f" -> {answer}")
+            text = e.payload.get("asked", e.payload["text"])
+            lines.append(f"- {e.payload['qid']} [{e.payload['kind']}] {text[:300]} -> {answer}")
         lines.append("## Messages from the user")
         msgs = self._events("user.message")
         lines += [f"- [{e.ts:%Y-%m-%d %H:%M} UTC]{' NEW' if e.seq > since else ''}"
@@ -441,6 +496,10 @@ class Lab:
                       (f"Undermind degraded {len(degraded)} time(s); latest at {last.ts:%H:%M} "
                        f"UTC: {last.payload['reason']} ({detail}). Agents fall back to the "
                        "`literature` server (OpenAlex, Semantic Scholar, arXiv).")]
+        held = [e for e in self._events("lab.question_held") if e.seq > since]
+        if held:
+            lines.append("## Questions held back by the platform (fix, then ask again)")
+            lines += [f"- {e.payload['qid']}: {p}" for e in held for p in e.payload["problems"]]
         reports = self.kernel.project.workspace / "reports"
         files = sorted(p.name for p in reports.iterdir()) if reports.is_dir() else []
         lines += ["## Files", f"workspace: {self.kernel.project.workspace}",

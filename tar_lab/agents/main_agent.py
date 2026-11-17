@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from tar_lab.core.charter import CHARTER_SCHEMA, Charter
+from tar_lab.core.charter import APPROVAL_POINTS, CHARTER_SCHEMA, Charter
 from tar_lab.core.workorder import Usage
 
 from .roles import ROLES
@@ -35,6 +35,7 @@ ORDER_SCHEMA = _obj({
     "minutes": {"type": "number"}, "inputs": _STRS,
 })
 ASK_SCHEMA = _obj({"kind": {"type": "string", "enum": ["question", "approval"]},
+                   "point": {"type": "string", "enum": ["none", *APPROVAL_POINTS]},
                    "text": _STR, "options": _STRS, "default": _STR})
 CHARTER_FIELDS = ("budget_usd", "deadline_hours", "approval_points", "target_venue",
                   "constraints", "on_timeout", "approval_timeout_hours", "max_deep_searches",
@@ -82,6 +83,12 @@ Rules:
   real or estimated numbers that the compared arms actually run different things. It is part
   of topic review, not an experiment, so it may run before approval; put its result in the
   topic report. If the check fails, redesign before asking the user.
+- Also before topic approval: the novelty of the recommended candidate must rest on at least
+  one Undermind deep search on its closest prior work (a researcher or reviewer order), and
+  a writer order must write `reports/topic_summary.md`, the plain-language page the user
+  reads first. Tag each approval question with the charter approval point it gates in
+  `point` ("none" otherwise). The platform puts the summary at the top of a "topic" question
+  and holds the question back, waking you with the reason, while either is missing.
 - If the research direction fails, scale the recovery to the remaining time and budget:
   explore two or three alternative directions in parallel (separate designer orders),
   review them, and offer the user a choice. Giving up on the charter's goal is the user's

@@ -22,7 +22,9 @@ GUIDES: dict[str, str] = {
 - Look beyond papers when useful: official code repositories, OpenReview discussions,
   leaderboards, surveys. Prefer work with public code that runs on small hardware.
 - Deep searches are rationed per project; use `search_papers` first and launch a deep search
-  only for the central question.
+  only for the central question. Novelty of the recommended topic is that question: run one
+  deep search on its closest prior work before the topic goes to the user, and report what it
+  found. If deep search is unavailable, say why and what you used instead.
 {_EVIDENCE}""",
     "designer": f"""\
 - For candidate topics, write one section per candidate: research question; hypothesis;
@@ -65,6 +67,13 @@ GUIDES: dict[str, str] = {
   it, and stating negative or inconclusive findings plainly.
 {_EVIDENCE}""",
     "writer": f"""\
+- Topic summary (`reports/topic_summary.md`, in the charter's chat language): one page the
+  user reads before approving a topic, under 2500 characters, for a reader outside the
+  subfield: no formulas, symbols or unexplained acronyms. Exactly four parts: what we will
+  do; why it is worth doing (what is new compared with the closest prior work, and what the
+  novelty search found); the most likely way it fails and what the design check showed; the
+  decisions the user must make (each with the options and the recommendation). Point to
+  `reports/topic_report.md` for details.
 - Reports go to `reports/` in the charter's report language; the paper goes to `paper/`
   (`main.tex`, `refs.bib`, figures copied in) in the charter's paper language.
 - Every number in the paper must come from `results/` or `reports/analysis.md`; keep
@@ -82,7 +91,7 @@ GUIDES: dict[str, str] = {
   and check each against the design and any design-check result; a design that fails here
   is rejected however careful its statistics are. Then rate novelty, value to the field,
   feasibility within the charter, and risk (1-10 each), check the closest prior work
-  yourself, and recommend one candidate or none. Write `reports/topic_review.md`.
+  yourself (run a deep search on it if none has been run for this candidate), and recommend one candidate or none. Write `reports/topic_review.md`.
 - Paper review: review as a reviewer for the charter's target venue: summary, strengths,
   weaknesses, major and minor issues, questions, and an overall score (1-10) with the
   venue's usual meaning. Check that numbers match `results/` and that citations exist.
