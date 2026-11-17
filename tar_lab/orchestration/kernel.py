@@ -9,13 +9,21 @@ from pathlib import Path
 from typing import Any
 
 from tar_lab.core.ledger import Ledger, OrderState
-from tar_lab.core.workorder import Attempt, Executor, Usage, WorkOrder, WorkResult
+from tar_lab.core.workorder import (
+    Attempt,
+    Executor,
+    McpServer,
+    Usage,
+    WorkOrder,
+    WorkResult,
+)
 from tar_lab.integrations.cli_agents.process import kill_group
 
 # Events that need the main agent's judgement.
 ATTENTION = frozenset({"order.finished", "order.half_time", "order.over_budget"})
 
 AttentionHook = Callable[[str, OrderState], None]
+McpHook = Callable[[WorkOrder], Mapping[str, McpServer]]
 _GIT_ID = ("-c", "user.name=TAR-Lab", "-c", "user.email=tar-lab@localhost")
 
 
@@ -50,6 +58,7 @@ class Kernel:
     ledger: Ledger
     executors: Mapping[str, Executor]
     on_attention: AttentionHook = field(default=lambda _kind, _state: None)
+    mcp_for: McpHook = field(default=lambda _order: {})
 
     def submit(self, order: WorkOrder) -> None:
         if order.id in self.ledger.orders():
@@ -117,7 +126,8 @@ class Kernel:
                 "attempt": number, "snapshot": self._snapshot(order.id, number),
                 "resume_session": resume, "timeout": round(remaining, 1)})
             attempt = Attempt(order, number, self.project.workspace,
-                              self.project.attempt_dir(order.id, number), remaining, resume)
+                              self.project.attempt_dir(order.id, number), remaining, resume,
+                              self.mcp_for(order))
             result = executor.run(attempt, lambda kind, payload: self._emit(order.id, kind, payload))
             if result.status == "crashed" and resume is not None:
                 # A failed resume falls back to a fresh attempt on the current workspace.

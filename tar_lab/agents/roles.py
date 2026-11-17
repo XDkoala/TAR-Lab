@@ -16,7 +16,8 @@ class RoleCard:
 
 ROLES: dict[str, RoleCard] = {card.name: card for card in (
     RoleCard("researcher", "medium",
-             "You survey literature, code and benchmarks, check novelty and find baselines."),
+             "You survey literature, code and benchmarks, check novelty and find baselines. Use the "
+             "`undermind` MCP tools for literature search and PDF reading when available."),
     RoleCard("designer", "high",
              "You propose research questions and experiment designs grounded in prior human "
              "work; every design choice must cite where it comes from."),
@@ -26,7 +27,8 @@ ROLES: dict[str, RoleCard] = {card.name: card for card in (
              "You analyse results, compute statistics and judge significance."),
     RoleCard("writer", "medium", "You write research reports and papers."),
     RoleCard("reviewer", "high",
-             "You review work against the standards of the target venue and judge its value."),
+             "You review work against the standards of the target venue and judge its value; "
+             "verify novelty and citations with the `undermind` tools when available."),
 )}
 
 _PERMISSIONS = {

@@ -19,7 +19,7 @@ from .agents.main_agent import MainAgent, Question
 from .core.charter import Charter
 from .core.ledger import Ledger, OrderState
 from .core.machine import describe
-from .core.workorder import Executor, Limits, WorkOrder
+from .core.workorder import Executor, Limits, McpServer, WorkOrder
 from .integrations.ai_scientist import AIScientistEngine, AIScientistExecutor, load_run
 from .integrations.cli_agents.codex import CodexExecutor
 from .integrations.cli_agents.devin import DevinExecutor
@@ -30,7 +30,8 @@ from .integrations.undermind import (
     UndermindClient,
     UndermindSettings,
 )
-from .orchestration.kernel import Kernel, Project
+from .integrations.undermind.proxy import create_project_workspace, run_stdio
+from .orchestration.kernel import Kernel, McpHook, Project
 from .orchestration.lab import Lab, question_text
 from .orchestration.notify import default_notifier
 
@@ -134,12 +135,31 @@ def _print_attention(kind: str, state: OrderState) -> None:
     print(f"[attention] {state.order.id}: {kind} (status={state.status})", file=sys.stderr)
 
 
+LITERATURE_ROLES = frozenset({"researcher", "designer", "reviewer", "writer"})
+_PROXY_ENV = ("HOME", "PATH", "USER", "LANG", "LC_ALL", "http_proxy", "https_proxy",
+              "all_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+def _mcp_hook(ledger: Ledger) -> McpHook:
+    def mcp_for(order: WorkOrder) -> dict[str, McpServer]:
+        has_workspace = any(e.kind == "undermind.workspace" for e in ledger.events())
+        if order.role not in LITERATURE_ROLES or not has_workspace:
+            return {}
+        env = {k: v for k, v in os.environ.items()
+               if k in _PROXY_ENV or k.startswith("TARLAB_UNDERMIND_")}
+        args = ("-m", "tar_lab.cli", "undermind", "serve", "--ledger", str(ledger.path),
+                "--order", order.id)
+        return {"undermind": McpServer(sys.executable, args, env)}
+    return mcp_for
+
+
 def _kernel(root: Path) -> Kernel:
     project = Project(root)
     if not project.ledger_path.exists():
         raise SystemExit(f"{root} is not a TAR-Lab project; run `tarlab project init` first")
-    return Kernel(project, Ledger(project.ledger_path), _executors(),
-                  on_attention=_print_attention)
+    ledger = Ledger(project.ledger_path)
+    return Kernel(project, ledger, _executors(), on_attention=_print_attention,
+                  mcp_for=_mcp_hook(ledger))
 
 
 def _lab(root: Path) -> Lab:
@@ -180,6 +200,13 @@ def _lab_command(args: argparse.Namespace) -> int:
         if charter is None:
             print("Not started; run `tarlab new` again to redo the intake.")
             return 1
+        try:
+            ws = anyio.run(create_project_workspace, lab.ledger, f"TAR-Lab: {charter.title}")
+            print(f"Undermind workspace: {ws}")
+        except (LoginRequiredError, RuntimeError) as exc:
+            print(f"Warning: no Undermind workspace ({exc}); literature tools are disabled. "
+                  "Run `tarlab undermind login`, then `tarlab undermind workspace` for this "
+                  "project.", file=sys.stderr)
         print(f"\nProject ready. Run: tarlab run {args.project}")
         return 0
     lab = _lab(args.project)
@@ -266,6 +293,12 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("tool")
             sub.add_argument("--args", default="{}", help="JSON object of tool arguments")
 
+    serve = um.add_parser("serve", help="stdio MCP proxy scoped to one project (for agents)")
+    serve.add_argument("--ledger", type=Path, required=True)
+    serve.add_argument("--order")
+    um.add_parser("workspace", help="create the project's Undermind workspace").add_argument(
+        "project", type=Path)
+
     engine = groups.add_parser("engine", help="AI-Scientist-v3 engine").add_subparsers(
         dest="command", required=True)
     summary = engine.add_parser("summary", help="summarize a run directory")
@@ -340,6 +373,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.group in ("new", "run", "status", "inbox", "reply", "resume"):
         return _lab_command(args)
+    if args.command == "serve":
+        run_stdio(args.ledger, args.order)
+        return 0
+    if args.command == "workspace":
+        lab = _lab(args.project)
+        charter = lab.charter()
+        if charter is None:
+            raise SystemExit("project has no charter yet")
+        print(anyio.run(create_project_workspace, lab.ledger, f"TAR-Lab: {charter.title}"))
+        return 0
     settings = UndermindSettings.from_env()
     policy = ToolPolicy(mode="read_write" if getattr(args, "allow_write", False) else "read_only")
     try:

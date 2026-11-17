@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,11 +16,24 @@ from tar_lab.core.workorder import (
     RESULT_SCHEMA,
     Attempt,
     EventSink,
+    McpServer,
     Usage,
     WorkResult,
 )
 
 from .process import run_supervised, tail
+
+# Account-level apps/connectors and plugins would give the agent tools outside TAR-Lab's
+# policy and audit (e.g. the user's own Undermind connector with all their workspaces).
+DISABLED_FEATURES = ("apps", "plugins", "remote_plugin")
+
+
+def _base_flags(model: str, effort: str) -> list[str]:
+    flags = ["--json", "--ignore-user-config", "-m", model,
+             "-c", f'model_reasoning_effort="{effort}"']
+    for feature in DISABLED_FEATURES:
+        flags += ["--disable", feature]
+    return flags
 
 
 def find_codex() -> str:
@@ -44,13 +58,13 @@ class CodexExecutor:
         cmd = [self.binary or find_codex(), "exec"]
         if attempt.resume_session:
             cmd.append("resume")
-        cmd += ["--json", "--ignore-user-config", "-m", self.model,
-                "-c", f'model_reasoning_effort="{self.reasoning_effort}"',
+        cmd += [*_base_flags(self.model, self.reasoning_effort),
                 "--output-schema", str(schema), "-o", str(last_message)]
         if self.sandbox == "bypass":
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
         elif not attempt.resume_session:  # resume inherits the session's sandbox
             cmd += ["-s", self.sandbox]
+        cmd += mcp_config(attempt.mcp_servers)
         if attempt.resume_session:
             cmd.append(attempt.resume_session)
         else:
@@ -114,8 +128,8 @@ class CodexExecutor:
             if '"turn.completed"' in line:
                 usage[0] = _usage(json.loads(line).get("usage", {}))
 
-        attempt_cmd = [self.binary or find_codex(), "exec", "--json", "--ignore-user-config",
-                       "-m", self.model, "-c", f'model_reasoning_effort="{self.reasoning_effort}"',
+        attempt_cmd = [self.binary or find_codex(), "exec",
+                       *_base_flags(self.model, self.reasoning_effort),
                        "--output-schema", str(schema_path), "-o", str(last),
                        "--skip-git-repo-check", "-C", str(cwd)]
         if self.sandbox == "bypass":
@@ -147,6 +161,21 @@ class CodexExecutor:
                     if info.get("total_token_usage"):
                         usage = _usage(info["total_token_usage"])
         return usage
+
+
+def mcp_config(servers: Mapping[str, McpServer]) -> list[str]:
+    """``-c`` overrides that register stdio MCP servers (values are TOML; JSON strings and
+    arrays are valid TOML)."""
+    flags = []
+    for name, server in servers.items():
+        key = f"mcp_servers.{name}"
+        env = ", ".join(f"{k} = {json.dumps(v)}" for k, v in server.env.items())
+        flags += ["-c", f"{key}.command={json.dumps(server.command)}",
+                  "-c", f"{key}.args={json.dumps(list(server.args))}",
+                  "-c", f"{key}.env={{{env}}}",
+                  "-c", f"{key}.startup_timeout_sec=60",
+                  "-c", f"{key}.tool_timeout_sec={server.tool_timeout_seconds}"]
+    return flags
 
 
 def _usage(u: dict[str, Any]) -> Usage:

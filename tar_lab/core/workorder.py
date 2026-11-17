@@ -107,6 +107,16 @@ EventSink = Callable[[str, Mapping[str, Any]], None]
 
 
 @dataclass(frozen=True)
+class McpServer:
+    """A stdio MCP server the executor should give its agent."""
+
+    command: str
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+    tool_timeout_seconds: int = 900
+
+
+@dataclass(frozen=True)
 class Attempt:
     """Everything an executor needs for one attempt at a work order."""
 
@@ -116,6 +126,7 @@ class Attempt:
     attempt_dir: Path
     timeout_seconds: float
     resume_session: str | None = None
+    mcp_servers: Mapping[str, McpServer] = field(default_factory=dict)
 
 
 class Executor(Protocol):

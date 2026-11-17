@@ -206,6 +206,8 @@ def test_codex_executor_parses_report_session_and_usage(tmp_path: Path,
     args = calls(tmp_path)[0]
     assert args[0] == "exec" and "resume" not in args and args[-1] == "-"
     assert "--dangerously-bypass-approvals-and-sandbox" in args
+    for feature in ("apps", "plugins", "remote_plugin"):  # no tools outside our policy
+        assert args[args.index(feature) - 1] == "--disable"
     prompt = (kernel.project.attempt_dir("wo-1", 1) / "prompt.md").read_text()
     assert "write hello.py" in prompt and "Wall time: 1 min" in prompt
 
