@@ -11,6 +11,7 @@ from tar_lab.core.ledger import Ledger
 from tar_lab.core.workorder import Usage, WorkResult
 from tar_lab.orchestration.kernel import Kernel, Project
 from tar_lab.orchestration.lab import Lab
+from tar_lab.orchestration.notify import NotificationError
 
 from .test_kernel import FakeExecutor
 
@@ -184,6 +185,19 @@ def test_order_minutes_capped_and_mapped_to_tier_executor(tmp_path: Path) -> Non
     lab.step()
     state = lab.ledger.orders()["o4-1-researcher"]
     assert state.order.limits.wall_seconds == 90 * 60 and state.order.executor == "fake"
+
+
+def test_notification_failures_are_recorded(tmp_path: Path) -> None:
+    lab, _ = make_lab(tmp_path, FakeModel([decision(ask=[APPROVAL])]))
+
+    class Broken:
+        def notify(self, subject: str, body: str) -> None:
+            raise NotificationError("smtp down")
+
+    lab.notifier = Broken()
+    lab.step()
+    failed = lab._events("notify.failed")
+    assert failed and failed[0].payload["error"] == "smtp down"
 
 
 def test_start_twice_rejected(tmp_path: Path) -> None:

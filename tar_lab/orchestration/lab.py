@@ -7,12 +7,11 @@ idempotently in case the loop died halfway through applying it.
 
 from __future__ import annotations
 
-import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from tar_lab.agents.main_agent import Decision, MainAgent, Question, compact
 from tar_lab.agents.roles import ROLES
@@ -21,6 +20,7 @@ from tar_lab.core.ledger import Event, Ledger
 from tar_lab.core.workorder import Limits, Usage, WorkOrder
 
 from .kernel import Kernel
+from .notify import ConsoleNotifier, NotificationError, Notifier
 
 LabStatus = Literal["intake", "working", "waiting", "error", "finished", "suspended"]
 WAKE = frozenset({"project.charter", "project.resumed", "order.finished", "user.reply",
@@ -29,16 +29,6 @@ REMINDER_HOURS = (1.0, 4.0, 12.0, 24.0)
 MAX_ORDER_MINUTES = 90.0
 MAX_IDLE_WAKES = 3
 MAX_DECISION_ERRORS = 3
-
-
-class Notifier(Protocol):
-    def notify(self, subject: str, body: str) -> None: ...
-
-
-@dataclass
-class ConsoleNotifier:
-    def notify(self, subject: str, body: str) -> None:
-        print(f"[TAR-Lab] {subject}\n{body}\n", file=sys.stderr)
 
 
 def _now() -> datetime:
@@ -155,6 +145,14 @@ class Lab:
 
     # ---- internals ----------------------------------------------------------------------
 
+    def _notify(self, subject: str, body: str) -> None:
+        try:
+            self.notifier.notify(subject, body)
+        except NotificationError as exc:
+            self.ledger.append("notify.failed", None, {"subject": subject, "error": str(exc)})
+        else:
+            self.ledger.append("notify.sent", None, {"subject": subject})
+
     def _last_seq(self, kind: str) -> int:
         events = self._events(kind)
         return events[-1].seq if events else 0
@@ -176,7 +174,7 @@ class Lab:
     def _check_deadline(self, charter: Charter) -> None:
         if self._elapsed_hours() >= charter.deadline_hours and not self._events("lab.deadline"):
             self.ledger.append("lab.deadline", None, {"deadline_hours": charter.deadline_hours})
-            self.notifier.notify("Deadline reached",
+            self._notify("Deadline reached",
                                  f"{charter.title}: the main agent must now wrap up.")
 
     def _idle(self) -> LabStatus:
@@ -190,7 +188,7 @@ class Lab:
 
     def _suspend(self, reason: str) -> LabStatus:
         self.ledger.append("project.suspended", None, {"reason": reason})
-        self.notifier.notify("Project suspended", f"{reason}\nResume with `tarlab resume`.")
+        self._notify("Project suspended", f"{reason}\nResume with `tarlab resume`.")
         return "suspended"
 
     def _timers(self, charter: Charter) -> LabStatus | None:
@@ -205,13 +203,13 @@ class Lab:
                     return self._suspend(f"No answer to {qid} within "
                                          f"{charter.approval_timeout_hours:g} hours.")
                 self.reply(qid, ev.payload["default"], auto=True)
-                self.notifier.notify(f"No answer to {qid}; default taken",
+                self._notify(f"No answer to {qid}; default taken",
                                      f"{ev.payload['text']}\nDefault: {ev.payload['default']}")
                 continue
             sent = reminders.get(qid, 0)
             if sent < len(REMINDER_HOURS) and hours >= REMINDER_HOURS[sent]:
                 self.ledger.append("user.reminder", None, {"qid": qid, "number": sent + 1})
-                self.notifier.notify(f"Reminder: {qid} is waiting for you",
+                self._notify(f"Reminder: {qid} is waiting for you",
                                      question_text(qid, ev.payload))
         return None
 
@@ -226,7 +224,7 @@ class Lab:
             self.ledger.append("lab.error", None, {"error": str(exc)[:2000]})
             if len(errors) + 1 >= MAX_DECISION_ERRORS:
                 return self._suspend(f"The main agent failed {MAX_DECISION_ERRORS} times: {exc}")
-            self.notifier.notify("Main agent error (will retry)", str(exc)[:2000])
+            self._notify("Main agent error (will retry)", str(exc)[:2000])
             return "error"
         ev = self.ledger.append("pi.decision", None,
                                 {"decision": decision.to_dict(), "usage": asdict(usage)})
@@ -238,7 +236,7 @@ class Lab:
         if decision.finish:
             if not self._events("project.finished"):
                 self.ledger.append("project.finished", None, {"summary": decision.final_summary})
-                self.notifier.notify(f"Project finished: {charter.title}",
+                self._notify(f"Project finished: {charter.title}",
                                      decision.final_summary)
             return
         existing = self.ledger.orders()
@@ -263,7 +261,7 @@ class Lab:
             payload = {"qid": qid, **q}
             self.ledger.append("user.question", None, payload)
             subject = "Approval needed" if q["kind"] == "approval" else "Question"
-            self.notifier.notify(f"{subject}: {charter.title}", question_text(qid, payload))
+            self._notify(f"{subject}: {charter.title}", question_text(qid, payload))
 
     def context(self, charter: Charter) -> str:
         elapsed = self._elapsed_hours()

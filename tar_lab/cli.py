@@ -31,7 +31,8 @@ from .integrations.undermind import (
     UndermindSettings,
 )
 from .orchestration.kernel import Kernel, Project
-from .orchestration.lab import ConsoleNotifier, Lab, question_text
+from .orchestration.lab import Lab, question_text
+from .orchestration.notify import default_notifier
 
 
 def _print_json(data: Any) -> None:
@@ -144,7 +145,7 @@ def _kernel(root: Path) -> Kernel:
 def _lab(root: Path) -> Lab:
     kernel = _kernel(root)
     agent = MainAgent(CodexExecutor(), kernel.project.root, describe(kernel.project.root))
-    return Lab(kernel, agent, ConsoleNotifier())
+    return Lab(kernel, agent, default_notifier())
 
 
 def _ask(q: Question) -> str:
@@ -283,6 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
                             ("inbox", "list questions waiting for you"),
                             ("resume", "resume a suspended project")):
         groups.add_parser(name, help=help_text).add_argument("project", type=Path)
+    groups.add_parser("notify-test", help="send a test notification (console and email)")
     reply = groups.add_parser("reply", help="answer a question or approval")
     reply.add_argument("project", type=Path)
     reply.add_argument("qid")
@@ -332,6 +334,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.group == "order":
         return _order_command(args)
+    if args.group == "notify-test":
+        default_notifier().notify("Test notification", "TAR-Lab can reach you here.")
+        print("Sent.")
+        return 0
     if args.group in ("new", "run", "status", "inbox", "reply", "resume"):
         return _lab_command(args)
     settings = UndermindSettings.from_env()
