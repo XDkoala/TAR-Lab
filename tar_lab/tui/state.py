@@ -11,7 +11,7 @@ from typing import Any
 
 from tar_lab.core.charter import Charter
 from tar_lab.core.ledger import Event, Ledger, OrderState
-from tar_lab.core.pricing import estimate_usd
+from tar_lab.core.pricing import order_cost, project_spend
 from tar_lab.core.workorder import Usage
 from tar_lab.orchestration.kernel import Project
 
@@ -90,9 +90,7 @@ class ProjectState:
         return self.models.get(executor, executor)
 
     def order_cost(self, state: OrderState) -> float | None:
-        if state.result is not None and state.result.cost_usd is not None:
-            return state.result.cost_usd
-        return estimate_usd(self.model_of(state.order.executor), state.usage)
+        return order_cost(state, self.model_of(state.order.executor))
 
     def order_view(self, oid: str, state: OrderState, gpu: GpuInfo | None = None) -> AgentView:
         now = self.clock()
@@ -132,13 +130,7 @@ class ProjectState:
         decisions = by_kind.get("pi.decision", [])
         last_decision = decisions[-1].seq if decisions else 0
 
-        spent = 0.0
-        for state in orders.values():
-            spent += self.order_cost(state) or 0.0
-        for kind in ("pi.decision", "intake.answers", "project.charter"):
-            for e in by_kind.get(kind, []):
-                if "usage" in e.payload:
-                    spent += estimate_usd(self.main_model, Usage(**e.payload["usage"])) or 0.0
+        spent = project_spend(events, orders, self.model_of, self.main_model).usd
 
         answered = {e.payload["qid"] for e in by_kind.get("user.reply", [])}
         questions = {e.payload["qid"]: e.payload for e in by_kind.get("user.question", [])

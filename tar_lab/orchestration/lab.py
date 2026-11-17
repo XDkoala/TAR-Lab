@@ -7,6 +7,8 @@ idempotently in case the loop died halfway through applying it.
 
 from __future__ import annotations
 
+import math
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -18,7 +20,9 @@ from tar_lab.agents.main_agent import Decision, MainAgent, Question, compact
 from tar_lab.agents.roles import ROLES
 from tar_lab.core.charter import APPROVAL_POINTS, Charter
 from tar_lab.core.ledger import Event, Ledger
-from tar_lab.core.workorder import Limits, Usage, WorkOrder
+from tar_lab.core.pricing import Spend, project_spend
+from tar_lab.core.workorder import Limits, WorkOrder
+from tar_lab.integrations.cli_agents.process import quota_error
 
 from .kernel import Kernel
 from .notify import ConsoleNotifier, NotificationError, Notifier
@@ -26,7 +30,9 @@ from .notify import ConsoleNotifier, NotificationError, Notifier
 LabStatus = Literal["intake", "working", "busy", "waiting", "error", "finished", "suspended"]
 WAKE = frozenset({"project.charter", "project.resumed", "order.finished", "order.cancelled",
                   "user.reply", "user.message", "order.over_budget", "lab.idle",
-                  "lab.deadline", "lab.question_held"})
+                  "lab.deadline", "lab.question_held", "lab.budget"})
+# While orders run, only these (and urgent user messages) wake the main agent at once.
+BUSY_WAKE = frozenset({"order.finished", "order.cancelled", "lab.question_held"})
 BUSY_POLL_SECONDS = 5.0
 REMINDER_HOURS = (1.0, 4.0, 12.0, 24.0)
 MAX_ORDER_MINUTES = 90.0
@@ -39,6 +45,11 @@ TOPIC_SUMMARY = "reports/topic_summary.md"
 SUMMARY_MAX_CHARS = 4000
 MAX_TOPIC_HOLDS = 2
 DEEP_SEARCH = "launch_deep_search"
+BUDGET_WARN_FRACTION = 0.8
+BUDGET_NO = "不追加，用现有结果收尾"
+MAX_PARALLEL_ORDERS = 3
+# Roles whose orders may use the GPU run one at a time; the rest run alongside them.
+EXCLUSIVE_ROLES = frozenset({"engineer"})
 
 
 def _now() -> datetime:
@@ -58,7 +69,8 @@ class Lab:
     threaded: bool = True
     # Ending a project is the user's decision: ``finish`` becomes a confirmation question.
     confirm_finish: bool = True
-    _worker: threading.Thread | None = field(default=None, init=False, repr=False)
+    max_parallel: int = MAX_PARALLEL_ORDERS
+    _workers: dict[str, threading.Thread] = field(default_factory=dict, init=False, repr=False)
     _recovered: bool = field(default=False, init=False, repr=False)
 
     @property
@@ -162,7 +174,7 @@ class Lab:
             return status
         charter = self.charter()
         assert charter is not None
-        busy = self._worker is not None and self._worker.is_alive()
+        busy = bool(self._running())
         if not busy and not self._recovered:
             self.kernel.recover()  # only orders left by a previous, dead loop
             self._recovered = True
@@ -176,21 +188,33 @@ class Lab:
                 return status
         self._check_deadline(charter)
         self._literature_alerts(charter)
-        if busy:
-            return self._decide(charter) if self._urgent_message() else "busy"
+        self._executor_alerts(charter)
+        self._budget_replies(charter)
+        charter = self.charter() or charter
+        exhausted = self._budget(charter)
+        agent_down = self._agent_executor() in self.kernel.unavailable()
+        if busy and not agent_down and (self._urgent_message() or self._settled()):
+            return self._decide(charter)
         if self._pause_requested():
-            return self._suspend("Paused by the user.")
-        if not self._urgent() and self._has_pending():
-            if not self.threaded:
-                self.kernel.run_next()
+            return "busy" if busy else self._suspend("Paused by the user.")
+        if not self._urgent() and not exhausted:
+            startable = self._startable()
+            if startable and not self.threaded:
+                self.kernel.run_order(startable[0])
                 return "working"
-            self._worker = threading.Thread(target=self.kernel.run_next, daemon=True)
-            self._worker.start()
+            for oid in startable:
+                worker = threading.Thread(target=self.kernel.run_order, args=(oid,), daemon=True)
+                self._workers[oid] = worker
+                worker.start()
+            busy = busy or bool(startable)
+        if busy:
             return "busy"
         if self._needs_decision():
-            return self._decide(charter)
+            return "waiting" if agent_down else self._decide(charter)
         if self.questions():
             return "waiting"
+        if self._has_pending() and not exhausted:
+            return "waiting"  # held until an executor is available again
         return self._idle()
 
     # ---- internals ----------------------------------------------------------------------
@@ -208,8 +232,112 @@ class Lab:
         return events[-1].seq if events else 0
 
     def _join_worker(self) -> None:
-        if self._worker is not None:
-            self._worker.join()
+        for worker in list(self._workers.values()):
+            worker.join()
+        self._workers.clear()
+
+    def _running(self) -> dict[str, threading.Thread]:
+        self._workers = {oid: w for oid, w in self._workers.items() if w.is_alive()}
+        return self._workers
+
+    def _startable(self) -> list[str]:
+        """Orders to start now, oldest first: at most ``max_parallel`` running in all, one
+        GPU order at a time, none on an executor that is out of quota."""
+        orders, unavailable = self.ledger.orders(), self.kernel.unavailable()
+        gpu_busy = any(_exclusive(orders[oid].order) for oid in self._workers if oid in orders)
+        picked: list[str] = []
+        for oid, st in orders.items():
+            if len(self._workers) + len(picked) >= self.max_parallel:
+                break
+            if (st.status not in ("pending", "interrupted") or oid in self._workers
+                    or st.order.executor in unavailable):
+                continue
+            if _exclusive(st.order):
+                if gpu_busy:
+                    continue
+                gpu_busy = True
+            picked.append(oid)
+        return picked
+
+    def _settled(self) -> bool:
+        """An order ended (or a question was held back) since the last decision."""
+        since = self._last_seq("pi.decision")
+        return any(e.seq > since for e in self._events(*BUSY_WAKE))
+
+    def _agent_executor(self) -> str:
+        return str(getattr(self.agent.model, "name", "main-agent"))
+
+    def spend(self) -> Spend:
+        models = {name: str(getattr(ex, "model", name)) for name, ex in
+                  self.kernel.executors.items()}
+        return project_spend(self.ledger.events(), self.ledger.orders(),
+                             lambda e: models.get(e, e), str(getattr(self.agent.model, "model", "")))
+
+    def _budget(self, charter: Charter) -> bool:
+        """Warn at 80 % of the budget; at 100 % hold new orders and ask the user whether to
+        raise it. Each level fires once per budget value. Returns whether it is used up."""
+        spent, budget = self.spend().usd, charter.budget_usd
+        fired = {(e.payload["level"], e.payload["budget_usd"]) for e in self._events("lab.budget")}
+        for level, fraction in (("warn", BUDGET_WARN_FRACTION), ("exhausted", 1.0)):
+            if spent < fraction * budget or (level, budget) in fired or (
+                    level == "warn" and budget <= 0):
+                continue
+            ev = self.ledger.append("lab.budget", None, {
+                "level": level, "spent_usd": round(spent, 4), "budget_usd": budget})
+            if level == "warn":
+                self._notify(f"Budget {spent / budget:.0%} used: {charter.title}",
+                             f"已花费约 ${spent:.2f}（按 API 标价估算），预算 ${budget:g}。")
+                continue
+            qid = f"q{ev.seq}-budget"
+            payload = {"qid": qid, "kind": "approval", "purpose": "budget",
+                       "text": f"已花费约 ${spent:.2f}（按 API 标价估算），用完了预算 ${budget:g}。"
+                               "新工单已暂停，正在跑的工单会跑完。要追加预算吗？可以选一个金额，"
+                               "也可以直接写别的金额。",
+                       "options": [f"追加到 ${math.ceil(budget * 1.5)}",
+                                   f"追加到 ${math.ceil(budget * 2)}", BUDGET_NO],
+                       "default": BUDGET_NO}
+            self.ledger.append("user.question", None, payload)
+            self._notify(f"Budget used up: {charter.title}", question_text(qid, payload))
+        return spent >= budget
+
+    def _budget_replies(self, charter: Charter) -> None:
+        """A reply naming a higher amount raises the budget; the user's answer is the
+        confirmation, so no extra round trip through the main agent is needed."""
+        done = {e.payload["qid"] for e in self._events("lab.budget_answer")}
+        for e in self._events("user.reply"):
+            qid = e.payload["qid"]
+            if not qid.endswith("-budget") or qid in done:
+                continue
+            match = re.search(r"\d+(?:\.\d+)?", e.payload["answer"].replace(",", ""))
+            amount = float(match.group()) if match else None
+            raised = amount is not None and amount > charter.budget_usd
+            self.ledger.append("lab.budget_answer", None,
+                               {"qid": qid, "budget_usd": amount if raised else None})
+            if raised and amount is not None:
+                updated, _ = _change_charter(charter, [{"field": "budget_usd",
+                                                        "value": f"{amount:g}"}])
+                self.ledger.append("project.charter_changed", None, {
+                    "qid": qid, "charter": updated.to_dict(),
+                    "changes": [{"field": "budget_usd", "value": f"{amount:g}"}], "rejected": []})
+                self._notify(f"Charter changed: {charter.title}",
+                             f"budget_usd: {charter.budget_usd:g} -> {amount:g}")
+                charter = updated
+
+    def _executor_alerts(self, charter: Charter) -> None:
+        """Tell the user once per executor outage."""
+        told = {e.payload["seq"] for e in self._events("lab.executor_notice")}
+        for e in self._events("executor.unavailable"):
+            if e.seq in told:
+                continue
+            self.ledger.append("lab.executor_notice", None, {"seq": e.seq})
+            name = e.payload["executor"]
+            fallback = self.kernel.fallbacks.get(name)
+            then = (f"受影响的工单已改由 {fallback} 执行。" if fallback in self.kernel.executors
+                    else "受影响的工单和主 Agent 先暂停，到时自动重试；也可以配置备用执行者"
+                         "（TARLAB_FALLBACK，例如 codex=devin）。")
+            until = datetime.fromisoformat(e.payload["until"])
+            self._notify(f"{name} 额度不足或被限流: {charter.title}",
+                         f"{name} 报错：{e.payload['error'][:300]}\n\n{until:%H:%M} UTC 后重试。{then}")
 
     def _has_pending(self) -> bool:
         return any(st.status in ("pending", "interrupted")
@@ -306,6 +434,9 @@ class Lab:
         try:
             decision, usage = self.agent.decide(self.context(charter), log_dir)
         except (RuntimeError, TypeError, KeyError, ValueError, OSError) as exc:
+            if quota_error(str(exc)):
+                self.kernel.mark_unavailable(self._agent_executor(), str(exc))
+                return "waiting"
             since = self._last_seq("pi.decision")
             errors = [e for e in self._events("lab.error") if e.seq > since]
             self.ledger.append("lab.error", None, {"error": str(exc)[:2000]})
@@ -342,8 +473,11 @@ class Lab:
                 self.ledger.append("lab.order_rejected", oid, {"reason": "deadline passed"})
                 continue
             minutes = max(1.0, min(float(o["minutes"]), MAX_ORDER_MINUTES, remaining_minutes))
+            executor = self.tiers[ROLES[o["role"]].tier]
+            if executor in self.kernel.unavailable():
+                executor = self.kernel.fallback_for(executor) or executor
             self.kernel.submit(WorkOrder(
-                oid, o["role"], self.tiers[ROLES[o["role"]].tier], o["goal"],
+                oid, o["role"], executor, o["goal"],
                 tuple(o["deliverables"]), o["acceptance"], Limits(int(minutes * 60)),
                 inputs=tuple(o["inputs"])))
         asked = {e.payload["qid"] for e in self._events("user.question", "lab.question_held")}
@@ -415,6 +549,22 @@ class Lab:
         return {**payload, "asked": payload["text"],
                 "text": "\n\n".join(p for p in parts if p)}
 
+    def _spend_lines(self, charter: Charter) -> list[str]:
+        spend = self.spend()
+        lines = [f"About ${spend.usd:.2f} of the ${charter.budget_usd:g} budget "
+                 f"({spend.usd / charter.budget_usd:.0%}), estimated at API list prices."
+                 if charter.budget_usd > 0 else f"About ${spend.usd:.2f}; the budget is $0."]
+        if spend.unpriced:
+            lines.append(f"No price known (counted as $0): {', '.join(spend.unpriced)}.")
+        if spend.usd >= charter.budget_usd:
+            lines.append("Budget used up: new orders are held (running ones finish) until the "
+                         "user raises the budget; the platform has asked. Do not dispatch more "
+                         "work unless the budget was raised; otherwise wrap up with `finish`.")
+        for name, until in self.kernel.unavailable().items():
+            lines.append(f"Executor {name} is out of quota until {until:%H:%M} UTC; its orders "
+                         "wait, or run on the fallback if one is configured.")
+        return lines
+
     def _deep_search_unavailable(self, charter: Charter) -> str | None:
         if charter.max_deep_searches <= 0:
             return "章程的深度检索额度为 0"
@@ -456,10 +606,9 @@ class Lab:
              f"({max(0.0, charter.deadline_hours - elapsed):.2f} left)."),
             "## Work orders",
         ]
-        tokens = Usage()
         for oid, s in self.ledger.orders().items():
-            tokens = tokens + s.usage
-            lines.append(f"- {oid} [{s.order.role}] status={s.status} attempts={s.attempts} "
+            lines.append(f"- {oid} [{s.order.role}/{s.order.executor}] status={s.status} "
+                         f"attempts={s.attempts} "
                          f"used={s.used_seconds / 60:.1f}/{s.order.limits.wall_seconds / 60:.0f}"
                          f" min tokens={s.usage.total_tokens}")
             lines.append(f"  goal: {s.order.goal[:400]}")
@@ -504,8 +653,7 @@ class Lab:
         files = sorted(p.name for p in reports.iterdir()) if reports.is_dir() else []
         lines += ["## Files", f"workspace: {self.kernel.project.workspace}",
                   f"reports: {', '.join(files) or '(none)'}",
-                  f"## Spend\nwork-order tokens so far: {tokens.total_tokens}",
-                  "## Why you were woken"]
+                  "## Spend", *self._spend_lines(charter), "## Why you were woken"]
         wake = [e for e in self.ledger.events() if e.seq > since and e.kind in WAKE
                 or e.seq > since and e.kind in ("lab.error", "lab.order_rejected")]
         lines += [f"- {e.kind} {e.order_id or ''} {compact(_brief(e.payload), 300)}"
@@ -541,6 +689,10 @@ def _change_charter(charter: Charter, changes: Sequence[Mapping[str, str]]
         except ValueError:
             rejected.append({"field": name, "value": value})
     return Charter.from_dict(data), rejected
+
+
+def _exclusive(order: WorkOrder) -> bool:
+    return order.role in EXCLUSIVE_ROLES or order.executor.startswith("ai-scientist")
 
 
 def _confirms_finish(e: Event) -> bool:

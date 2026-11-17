@@ -410,3 +410,98 @@ def test_topic_approval_goes_out_with_warnings_after_two_holds(tmp_path: Path) -
     lab.step()
     [(_, q)] = lab.questions().items()
     assert "平台检查未通过" in q.payload["text"] and "topic_summary.md" in q.payload["text"]
+
+
+@dataclass
+class PricedExecutor(FakeExecutor):
+    model: str = "gpt-6.1-sol"
+
+
+def test_budget_warns_holds_orders_and_is_raised_by_the_users_answer(tmp_path: Path) -> None:
+    cost16 = Usage(8_000_000, 0, 0)  # $16 at gpt-6.1-sol list prices
+    ex = PricedExecutor([WorkResult("done", "ok", usage=cost16, session_id="s")] * 3)
+    model = FakeModel([decision([order(), order(), order()]), decision(), decision()])
+    lab, sent = make_lab(tmp_path, model, executor=ex)  # budget $30
+    lab.step()
+    lab.step()
+    lab.step()  # two orders ran: $32
+    assert lab.step() == "working"  # the budget events wake the main agent
+    assert [e.payload["level"] for e in lab._events("lab.budget")] == ["warn", "exhausted"]
+    assert "Budget used up" in model.prompts[-1] and "of the $30 budget" in model.prompts[-1]
+    assert lab.step() == "waiting" and lab.ledger.orders()["o4-3-researcher"].status == "pending"
+    [(qid, q)] = lab.questions().items()
+    assert qid.endswith("-budget") and q.payload["default"] == "不追加，用现有结果收尾"
+    assert any(s.startswith("Budget used up") for s in sent)
+
+    lab.reply(qid, "追加到 $45")
+    lab.step()
+    charter = lab.charter()
+    assert charter is not None and charter.budget_usd == 45
+    assert lab.ledger.orders()["o4-3-researcher"].status == "done"  # released and run
+
+
+def test_declining_more_budget_keeps_orders_held(tmp_path: Path) -> None:
+    ex = PricedExecutor([WorkResult("done", "ok", usage=Usage(16_000_000, 0, 0),
+                                    session_id="s")])
+    model = FakeModel([decision([order(), order()]), decision(), decision(), decision()])
+    lab, _ = make_lab(tmp_path, model, executor=ex)
+    lab.step()
+    lab.step()  # $32 spent
+    lab.step()
+    [(qid, _)] = lab.questions().items()
+    lab.reply(qid, "不追加，用现有结果收尾")
+    lab.step()
+    charter = lab.charter()
+    assert charter is not None and charter.budget_usd == 30
+    assert lab.ledger.orders()["o4-2-researcher"].status == "pending"
+
+
+@dataclass
+class ConcurrentExecutor:
+    name: str = "fake"
+    supports_resume: bool = True
+    release: threading.Event = field(default_factory=threading.Event)
+    active: set[str] = field(default_factory=set)
+    peak: list[set[str]] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def run(self, attempt: Any, emit: Any) -> WorkResult:
+        with self.lock:
+            self.active.add(attempt.order.id)
+            self.peak.append(set(self.active))
+        self.release.wait(10)
+        with self.lock:
+            self.active.discard(attempt.order.id)
+        return WorkResult("done", "ok", session_id=attempt.order.id)
+
+    def session_usage(self, session_id: str) -> Usage | None:
+        return None
+
+
+def test_orders_run_in_parallel_but_gpu_orders_one_at_a_time(tmp_path: Path) -> None:
+    ex = ConcurrentExecutor()
+    roles = ["engineer", "engineer", "researcher", "designer", "reviewer"]
+    model = FakeModel([decision([order(r) for r in roles])] + [decision()] * 20)
+    lab, _ = make_lab(tmp_path, model, executor=ex, threaded=True)
+    lab.step()
+    drive(lab, lambda: len(ex.active) == 3)
+    time.sleep(0.2)
+    assert ex.active == {"o4-1-engineer", "o4-3-researcher", "o4-4-designer"}  # cap 3, 1 GPU
+    ex.release.set()
+    drive(lab, lambda: all(s.status == "done" for s in lab.ledger.orders().values()))
+    assert all(sum(o.endswith("engineer") for o in seen) <= 1 for seen in ex.peak)
+    lab._join_worker()
+
+
+def test_main_agent_out_of_quota_waits_instead_of_failing(tmp_path: Path) -> None:
+    clock = Clock()
+    error = RuntimeError("codex gave no JSON answer: You've hit your usage limit.")
+    model = FakeModel([error, decision(message="back")])
+    lab, sent = make_lab(tmp_path, model, clock=clock)
+    lab.kernel.clock = clock
+    assert lab.step() == "waiting"
+    assert lab.step() == "waiting" and len(model.prompts) == 3  # not asked again yet
+    assert not lab._events("lab.error") and len([s for s in sent if "额度" in s]) == 1
+    clock.offset = timedelta(minutes=31)
+    lab.step()
+    assert [e.payload["text"] for e in lab._events("pi.message")] == ["back"]

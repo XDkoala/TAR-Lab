@@ -166,7 +166,14 @@ def _kernel(root: Path) -> Kernel:
         raise SystemExit(f"{root} is not a TAR-Lab project; run `tarlab project init` first")
     ledger = Ledger(project.ledger_path)
     return Kernel(project, ledger, _executors(), on_attention=_print_attention,
-                  mcp_for=_mcp_hook(ledger))
+                  mcp_for=_mcp_hook(ledger), fallbacks=_fallbacks())
+
+
+def _fallbacks() -> dict[str, str]:
+    """``TARLAB_FALLBACK=codex=devin,devin=codex``: executor to use when one is out of quota.
+    Off by default: a fallback may bill beyond its plan (Devin charges extra usage)."""
+    pairs = (item.split("=", 1) for item in os.environ.get("TARLAB_FALLBACK", "").split(","))
+    return {a.strip(): b.strip() for a, *rest in pairs for b in rest if a.strip() and b.strip()}
 
 
 def _lab(root: Path) -> Lab:

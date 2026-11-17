@@ -72,6 +72,11 @@ Rules:
   an approval point listed in the charter, ask the user with kind "approval" and include a
   safe default. Ask nothing else unless it truly blocks progress.
 - Work that does not depend on an open question may continue while you wait for the answer.
+- Orders run in parallel: up to three at once, engineer orders (which may use the GPU) one at
+  a time. Orders dispatched together must not depend on each other. You are woken whenever
+  one finishes, also while others are still running.
+- The budget is enforced: at 80 % the user is warned; at 100 % new orders are held and the
+  platform asks the user whether to raise it.
 - Work orders run inside `workspace/`; give them paths relative to it. The user expects:
   `reports/survey.md`, `reports/topic_report.md` (candidates, review, recommendation; this is
   what the user approves when "topic" is an approval point), code and `results/`,

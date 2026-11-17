@@ -340,3 +340,32 @@ def test_snapshot_skips_environments_caches_and_large_files(tmp_path: Path) -> N
     kernel.run_pending()
     exclude = (ws / ".git" / "info" / "exclude").read_text()
     assert exclude.count("tar-lab snapshot excludes") == 2 and "data" not in exclude
+
+
+QUOTA = "You've hit your usage limit. Upgrade to Pro or try again later."
+
+
+def test_out_of_quota_order_moves_to_the_fallback_executor(tmp_path: Path) -> None:
+    out = FakeExecutor([WorkResult("crashed", "no report", error=QUOTA, session_id="sess-1",
+                                   usage=Usage(7, 0, 1))])
+    backup = FakeExecutor([WorkResult("done", "ok", session_id="b-1")], name="backup")
+    project = Project(tmp_path / "proj")
+    project.init()
+    kernel = Kernel(project, Ledger(project.ledger_path), {"fake": out, "backup": backup},
+                    fallbacks={"fake": "backup"})
+    kernel.submit(order())
+    kernel.run_pending()
+    state = kernel.ledger.orders()["wo-1"]
+    assert state.status == "done" and state.order.executor == "backup"
+    assert backup.seen[0].resume_session is None  # a fresh session on the new executor
+    assert state.usage.input_tokens == 7  # the failed attempt's tokens stay booked
+    assert set(kernel.unavailable()) == {"fake"}
+
+
+def test_out_of_quota_order_waits_without_a_fallback(tmp_path: Path) -> None:
+    ex = FakeExecutor([WorkResult("crashed", "no report", error=QUOTA, session_id="sess-1")])
+    kernel = make_kernel(tmp_path, ex)
+    kernel.submit(order())
+    kernel.run_pending()
+    assert kernel.ledger.orders()["wo-1"].status == "interrupted"
+    assert set(kernel.unavailable()) == {"fake"} and kernel.fallback_for("fake") is None

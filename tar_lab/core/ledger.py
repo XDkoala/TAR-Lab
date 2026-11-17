@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -109,6 +109,9 @@ def _apply(state: OrderState, ev: Event) -> None:
         state.snapshot, state.pgid = p.get("snapshot"), None
     elif ev.kind == "order.process":
         state.pgid = p["pgid"]
+    elif ev.kind == "order.reassigned":
+        state.order = replace(state.order, executor=p["to"])
+        state.session_id = None
     elif ev.kind == "order.session":
         state.session_id = p["session_id"]
     elif ev.kind == "order.usage":

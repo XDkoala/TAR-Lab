@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +20,7 @@ from tar_lab.core.workorder import (
     WorkOrder,
     WorkResult,
 )
-from tar_lab.integrations.cli_agents.process import kill_group
+from tar_lab.integrations.cli_agents.process import kill_group, quota_error
 
 # Events that need the main agent's judgement.
 ATTENTION = frozenset({"order.finished", "order.half_time", "order.over_budget"})
@@ -33,6 +35,8 @@ SNAPSHOT_SKIP_DIRS = frozenset({".git", ".venv", "venv", ".cache", "__pycache__"
                                 ".mypy_cache", ".pytest_cache", ".ruff_cache",
                                 ".ipynb_checkpoints"})
 SNAPSHOT_MAX_FILE_BYTES = 10 * 1024 * 1024
+# How long an executor that reported an exhausted quota or rate limit is left alone.
+EXECUTOR_COOLDOWN = timedelta(minutes=30)
 _EXCLUDE_BEGIN, _EXCLUDE_END = "# >>> tar-lab snapshot excludes", "# <<< tar-lab snapshot excludes"
 
 
@@ -120,6 +124,30 @@ class Kernel:
     executors: Mapping[str, Executor]
     on_attention: AttentionHook = field(default=lambda _kind, _state: None)
     mcp_for: McpHook = field(default=lambda _order: {})
+    # Executor to switch to when one runs out of quota, e.g. {"codex": "devin"}.
+    fallbacks: Mapping[str, str] = field(default_factory=dict)
+    clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    # Orders may run on several threads; git snapshots of the shared workspace may not.
+    _snapshot_lock: threading.Lock = field(default_factory=threading.Lock, init=False,
+                                           repr=False)
+
+    def unavailable(self) -> dict[str, datetime]:
+        """Executors cooling off after a quota error, with the time they may be tried again."""
+        now, until = self.clock(), {}
+        for e in self.ledger.events():
+            if e.kind == "executor.unavailable":
+                until[e.payload["executor"]] = datetime.fromisoformat(e.payload["until"])
+        return {name: t for name, t in until.items() if t > now}
+
+    def mark_unavailable(self, executor: str, error: str, order_id: str | None = None) -> None:
+        self.ledger.append("executor.unavailable", order_id, {
+            "executor": executor, "error": error[:500],
+            "until": (self.clock() + EXECUTOR_COOLDOWN).isoformat()})
+
+    def fallback_for(self, executor: str) -> str | None:
+        fallback = self.fallbacks.get(executor)
+        usable = fallback in self.executors and fallback not in self.unavailable()
+        return fallback if usable else None
 
     def submit(self, order: WorkOrder) -> None:
         if order.id in self.ledger.orders():
@@ -193,10 +221,20 @@ class Kernel:
                 return oid
         return None
 
+    def run_order(self, order_id: str) -> None:
+        state = self.ledger.orders()[order_id]
+        if state.status in ("pending", "interrupted"):
+            self._run(state)
+
     def _run(self, state: OrderState) -> None:
-        order = state.order
-        executor = self.executors[order.executor]
+        oid = state.order.id
+
+        def emit(kind: str, payload: Mapping[str, Any]) -> None:
+            self._emit(oid, kind, payload)
+
         while True:
+            order = state.order
+            executor = self.executors[order.executor]
             remaining = order.limits.wall_seconds - state.used_seconds
             if remaining <= 0 or state.attempts >= order.limits.max_attempts:
                 reason = "wall time" if remaining <= 0 else "attempts"
@@ -215,11 +253,26 @@ class Kernel:
             attempt = Attempt(order, number, self.project.workspace,
                               self.project.attempt_dir(order.id, number), remaining, resume,
                               self.mcp_for(order))
-            result = executor.run(attempt, lambda kind, payload: self._emit(order.id, kind, payload))
+            result = executor.run(attempt, emit)
             if (cancel_reason := self._cancel_requested(order.id, number)) is not None:
                 self.ledger.append("order.cancelled", order.id,
                                    {"reason": cancel_reason, "result": result.to_dict()})
                 return
+            if result.status == "crashed" and quota_error(result.error):
+                # Out of quota: not the order's fault. Switch executor or wait out the cooldown.
+                self.mark_unavailable(order.executor, result.error or "", order.id)
+                if result.session_id:
+                    self.ledger.append("order.usage", order.id, {
+                        "session_id": result.session_id, "usage": asdict(result.usage)})
+                self.ledger.append("order.interrupted", order.id,
+                                   {"reason": "executor unavailable", "error": result.error})
+                if (fallback := self.fallback_for(order.executor)) is None:
+                    return
+                self.ledger.append("order.reassigned", order.id,
+                                   {"from": order.executor, "to": fallback,
+                                    "reason": "executor out of quota"})
+                state = self.ledger.orders()[order.id]
+                continue
             if result.status == "crashed" and resume is not None:
                 # A failed resume falls back to a fresh attempt on the current workspace.
                 self._record_session_usage(self.ledger.orders()[order.id])
@@ -256,6 +309,10 @@ class Kernel:
     def _snapshot(self, order_id: str, attempt: int) -> tuple[str, dict[str, Any]]:
         """Commit the workspace so every attempt can be diffed or reverted; large files and
         rebuildable directories are skipped and reported instead."""
+        with self._snapshot_lock:
+            return self._snapshot_locked(order_id, attempt)
+
+    def _snapshot_locked(self, order_id: str, attempt: int) -> tuple[str, dict[str, Any]]:
         ws = str(self.project.workspace)
         ex = snapshot_excludes(self.project.workspace)
         _write_excludes(self.project.workspace, ex)

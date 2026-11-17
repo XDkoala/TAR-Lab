@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -15,6 +16,13 @@ from pathlib import Path
 from tar_lab.core.workorder import EventSink
 
 KILL_GRACE_SECONDS = 10.0
+_QUOTA = re.compile(r"usage limit|rate[ _-]?limit|quota|too many requests|\b429\b|out of credits"
+                    r"|credit balance|hit your (usage )?limit|purchase more credits", re.IGNORECASE)
+
+
+def quota_error(text: str | None) -> bool:
+    """Whether an agent CLI's error looks like an exhausted plan quota or a rate limit."""
+    return bool(text) and _QUOTA.search(text or "") is not None
 
 
 @dataclass(frozen=True)

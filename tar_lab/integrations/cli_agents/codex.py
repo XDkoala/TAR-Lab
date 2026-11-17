@@ -129,11 +129,13 @@ class CodexExecutor:
         schema_path.write_text(json.dumps(schema))
         prompt_path.write_text(prompt)
         last.unlink(missing_ok=True)
-        usage = [Usage()]
+        usage, errors = [Usage()], []
 
         def on_line(line: str) -> None:
             if '"turn.completed"' in line:
                 usage[0] = _usage(json.loads(line).get("usage", {}))
+            elif '"turn.failed"' in line or '"type":"error"' in line.replace(" ", ""):
+                errors.append(line[:1000])
 
         attempt_cmd = [self.binary or find_codex(), "exec",
                        *_base_flags(self.model, self.reasoning_effort),
@@ -150,7 +152,8 @@ class CodexExecutor:
         try:
             answer = json.loads(last.read_text())
         except (FileNotFoundError, json.JSONDecodeError) as exc:
-            detail = "timed out" if outcome.timed_out else tail(log_dir / "stderr.log")
+            detail = "timed out" if outcome.timed_out else (
+                " ".join(errors[-2:]) or tail(log_dir / "stderr.log"))
             raise RuntimeError(f"codex gave no JSON answer: {detail}") from exc
         if not isinstance(answer, dict):
             raise TypeError("codex answer is not a JSON object")
