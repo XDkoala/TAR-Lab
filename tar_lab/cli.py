@@ -34,6 +34,7 @@ from .integrations.undermind.proxy import create_project_workspace, run_stdio
 from .orchestration.kernel import Kernel, McpHook, Project
 from .orchestration.lab import Lab, question_text
 from .orchestration.notify import default_notifier
+from .tools.tex import build as build_tex
 
 
 def _print_json(data: Any) -> None:
@@ -317,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
                             ("inbox", "list questions waiting for you"),
                             ("resume", "resume a suspended project")):
         groups.add_parser(name, help=help_text).add_argument("project", type=Path)
+    tex = groups.add_parser("tex", help="LaTeX builds in Docker").add_subparsers(
+        dest="command", required=True)
+    tex_build = tex.add_parser("build", help="compile a paper directory to PDF")
+    tex_build.add_argument("paper_dir", type=Path)
+    tex_build.add_argument("--main", default="main.tex")
     groups.add_parser("notify-test", help="send a test notification (console and email)")
     reply = groups.add_parser("reply", help="answer a question or approval")
     reply.add_argument("project", type=Path)
@@ -367,6 +373,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.group == "order":
         return _order_command(args)
+    if args.group == "tex":
+        result = build_tex(args.paper_dir, args.main)
+        print(f"PDF: {result.pdf}" if result.pdf else f"Build failed; see {result.log}")
+        return 0 if result.pdf else 1
     if args.group == "notify-test":
         default_notifier().notify("Test notification", "TAR-Lab can reach you here.")
         print("Sent.")

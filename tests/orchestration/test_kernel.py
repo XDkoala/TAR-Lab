@@ -272,3 +272,11 @@ def test_codex_executor_hard_wall_time_limit(tmp_path: Path, fake_codex: Path,
         os.killpg(pgid, 0)
 
 
+
+
+def test_prompt_includes_role_guide_and_limits() -> None:
+    from tar_lab.agents.roles import render_prompt
+
+    prompt = render_prompt(order())
+    assert "## How to work" in prompt and "CUDA 12.8" in prompt and "15 minutes" in prompt
+    assert "interrupted" in render_prompt(order(), resume=True)

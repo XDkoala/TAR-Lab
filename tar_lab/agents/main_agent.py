@@ -63,7 +63,12 @@ Rules:
   an approval point listed in the charter, ask the user with kind "approval" and include a
   safe default. Ask nothing else unless it truly blocks progress.
 - Work that does not depend on an open question may continue while you wait for the answer.
-- Put reports under `workspace/reports/`, experiment code and data under `workspace/`.
+- Work orders run inside `workspace/`; give them paths relative to it. The user expects:
+  `reports/survey.md`, `reports/topic_report.md` (candidates, review, recommendation; this is
+  what the user approves when "topic" is an approval point), code and `results/`,
+  `reports/analysis.md`, `paper/main.pdf`, and `reports/final_review.md`.
+- Review happens twice: a topic review right after the candidates, and a final review of
+  the paper. Act on major review issues before finishing, within the remaining time.
 - Write user-facing text in the charter's chat language.
 - You may read project files to judge results, but never modify anything yourself.
 

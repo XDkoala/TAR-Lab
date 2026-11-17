@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from tar_lab.core.workorder import WorkOrder
 
+from .guides import GUIDES
+
 
 @dataclass(frozen=True)
 class RoleCard:
@@ -68,6 +70,8 @@ def render_prompt(order: WorkOrder, *, resume: bool = False) -> str:
     ]
     if order.inputs:
         lines += ["", "## Inputs", *[f"- {i}" for i in order.inputs]]
+    if role.name in GUIDES:
+        lines += ["", "## How to work", GUIDES[role.name]]
     if order.require_sources:
         lines += ["", "## Sources",
                   ("Base key design decisions on existing papers or code and list them in "
