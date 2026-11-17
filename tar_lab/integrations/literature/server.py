@@ -13,6 +13,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from tar_lab.core.ledger import Ledger
+from tar_lab.integrations.undermind.proxy import RESOURCE_HANDLERS
 
 from .sources import SOURCES, Literature, SourceError
 
@@ -103,6 +104,7 @@ async def serve(ledger_path: Path | None, order_id: str | None) -> None:
 
     server: Server[Any] = Server(
         "tar-lab-literature", on_list_tools=on_list_tools, on_call_tool=on_call_tool,
+        **RESOURCE_HANDLERS,
         instructions=("Open literature sources (OpenAlex, Semantic Scholar, arXiv). Use when "
                       "Undermind is rate limited, out of quota or unavailable, or to "
                       "cross-check it. Download PDFs yourself from `pdf_url`."))

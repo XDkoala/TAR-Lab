@@ -186,9 +186,24 @@ def proxy_policy(scope: ProxyScope) -> ToolPolicy:
                                       "delete_deep_search"}))
 
 
+async def no_resources(_ctx: Any, _params: Any) -> types.ListResourcesResult:
+    return types.ListResourcesResult(resources=[])
+
+
+async def no_resource_templates(_ctx: Any, _params: Any) -> types.ListResourceTemplatesResult:
+    return types.ListResourceTemplatesResult(resource_templates=[])
+
+
+# Agents probe resources before tools; answering "method not found" made one conclude the
+# whole server was unusable, so both TAR-Lab servers report an empty resource list instead.
+RESOURCE_HANDLERS: dict[str, Any] = {"on_list_resources": no_resources,
+                                     "on_list_resource_templates": no_resource_templates}
+
+
 async def _serve(on_list: Any, on_call: Any, instructions: str) -> None:
     server: Server[Any] = Server("tar-lab-undermind", on_list_tools=on_list,
-                                 on_call_tool=on_call, instructions=instructions)
+                                 on_call_tool=on_call, instructions=instructions,
+                                 **RESOURCE_HANDLERS)
     async with stdio_server() as (read, write):
         await server.run(read, write, server.create_initialization_options())
 

@@ -60,9 +60,17 @@ _TOOL_NOTES = {
 }
 
 
+_TOOLS_NOT_RESOURCES = ("These servers provide MCP tools, not MCP resources: an empty or "
+                        "failing resource listing says nothing about them. Find the tools "
+                        "(e.g. search your tools for the server name) and call one before "
+                        "deciding a server is unavailable.")
+
+
 def tool_notes(servers: Sequence[str]) -> str:
     notes = [_TOOL_NOTES.get(s, f"The `{s}` MCP server is attached to this session.")
              for s in servers]
+    if notes:
+        notes.append(_TOOLS_NOT_RESOURCES)
     return "\n".join(f"- {n}" for n in notes)
 
 
