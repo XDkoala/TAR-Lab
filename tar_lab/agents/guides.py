@@ -51,7 +51,8 @@ GUIDES: dict[str, str] = {
 - Snapshots: before every attempt the workspace is committed to git, except `.venv/`,
   `.cache/` and files over 10 MB (datasets, wheels, checkpoints). Those are not recoverable
   from snapshots, so record where each one came from (URL, version, checksum) and the command
-  that rebuilds it.
+  that rebuilds it. Repositories cloned into the workspace are recorded as origin, commit
+  and a patch of your local changes (`.tar-lab/nested/`); commit nothing inside them.
 - GPU: an RTX 5060 Laptop (Blackwell, 8 GB). Use PyTorch wheels built for CUDA 12.8 or newer;
   older wheels fail on this GPU. Record `torch.cuda.max_memory_allocated()` and wall time in
   every `metrics.json`. Keep each run under 15 minutes and 6 GB; if a run would exceed

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import tempfile
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -37,6 +39,9 @@ SNAPSHOT_SKIP_DIRS = frozenset({".git", ".venv", "venv", ".cache", "__pycache__"
 SNAPSHOT_MAX_FILE_BYTES = 10 * 1024 * 1024
 # How long an executor that reported an exhausted quota or rate limit is left alone.
 EXECUTOR_COOLDOWN = timedelta(minutes=30)
+# Git stores a repository cloned inside the workspace as a bare commit pointer, so its files
+# and local edits are not in the snapshot. Each one is recorded here instead.
+NESTED_DIR = ".tar-lab/nested"
 _EXCLUDE_BEGIN, _EXCLUDE_END = "# >>> tar-lab snapshot excludes", "# <<< tar-lab snapshot excludes"
 
 
@@ -44,10 +49,12 @@ _EXCLUDE_BEGIN, _EXCLUDE_END = "# >>> tar-lab snapshot excludes", "# <<< tar-lab
 class SnapshotExcludes:
     dirs: tuple[str, ...]
     large_files: tuple[tuple[str, int], ...]  # (path relative to the workspace, bytes)
+    nested_repos: tuple[str, ...] = ()
 
     def summary(self) -> dict[str, Any]:
         biggest = sorted(self.large_files, key=lambda f: -f[1])[:20]
-        return {"dirs": list(self.dirs), "large_files": len(self.large_files),
+        return {"dirs": list(self.dirs), "nested_repos": list(self.nested_repos),
+                "large_files": len(self.large_files),
                 "large_bytes": sum(b for _, b in self.large_files),
                 "largest": [{"path": p, "bytes": b} for p, b in biggest],
                 "max_file_bytes": SNAPSHOT_MAX_FILE_BYTES}
@@ -55,7 +62,7 @@ class SnapshotExcludes:
 
 def snapshot_excludes(workspace: Path) -> SnapshotExcludes:
     """Find what the snapshot skips, by file size only (no file is read)."""
-    dirs, large = [], []
+    dirs, large, nested = [], [], []
     for top, subdirs, files in os.walk(workspace):
         rel_top = Path(top).relative_to(workspace)
         for d in list(subdirs):
@@ -63,6 +70,9 @@ def snapshot_excludes(workspace: Path) -> SnapshotExcludes:
                 subdirs.remove(d)
                 if d != ".git":
                     dirs.append((rel_top / d).as_posix())
+            elif (Path(top) / d / ".git").exists():
+                subdirs.remove(d)
+                nested.append((rel_top / d).as_posix())
         for f in files:
             path = Path(top) / f
             try:
@@ -71,7 +81,55 @@ def snapshot_excludes(workspace: Path) -> SnapshotExcludes:
                 continue
             if size > SNAPSHOT_MAX_FILE_BYTES and not path.is_symlink():
                 large.append(((rel_top / f).as_posix(), size))
-    return SnapshotExcludes(tuple(sorted(dirs)), tuple(sorted(large)))
+    return SnapshotExcludes(tuple(sorted(dirs)), tuple(sorted(large)), tuple(sorted(nested)))
+
+
+def _git(repo: Path, *args: str, env: Mapping[str, str] | None = None) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                          env=env, check=False).stdout.strip()
+
+
+def nested_repo_state(workspace: Path, rel: str) -> dict[str, Any]:
+    """Origin, commit and a binary patch of every local change (new files included, files over
+    ``SNAPSHOT_MAX_FILE_BYTES`` listed instead), built in a throwaway index so the
+    repository's own index is untouched. The patch is written under ``NESTED_DIR``."""
+    repo = workspace / rel
+    head = _git(repo, "rev-parse", "--verify", "-q", "HEAD") or None
+    state: dict[str, Any] = {"path": rel, "remote": _git(repo, "remote", "get-url", "origin")
+                             or None, "head": head, "patch": None, "skipped_large": []}
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        if head:
+            _git(repo, "read-tree", "HEAD", env=env)
+        _git(repo, "add", "-A", env=env)
+        base = head or _git(repo, "hash-object", "-t", "tree", "/dev/null")
+        for name in _git(repo, "diff", "--cached", "--name-only", base, env=env).splitlines():
+            f = repo / name
+            if f.is_file() and not f.is_symlink() and f.stat().st_size > SNAPSHOT_MAX_FILE_BYTES:
+                _git(repo, "rm", "--cached", "-q", "--", name, env=env)
+                state["skipped_large"].append(name)
+        patch = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--binary", base],
+                               capture_output=True, env=env, check=False).stdout
+    if patch:
+        target = workspace / NESTED_DIR / (rel.replace("/", "__") + ".patch")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(patch)
+        state["patch"] = target.relative_to(workspace).as_posix()
+    return state
+
+
+def _record_nested(workspace: Path, repos: tuple[str, ...]) -> None:
+    out = workspace / NESTED_DIR
+    for old in out.glob("*.patch") if out.is_dir() else ():
+        old.unlink()
+    if not repos:
+        return
+    states = [nested_repo_state(workspace, rel) for rel in repos]
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "manifest.json").write_text(json.dumps({
+        "restore": "git clone <remote> <path> && git -C <path> checkout <head> && "
+                   "git -C <path> apply --binary <workspace>/<patch>",
+        "repos": states}, indent=2, ensure_ascii=False) + "\n")
 
 
 def _glob_escape(path: str) -> str:
@@ -316,6 +374,7 @@ class Kernel:
         ws = str(self.project.workspace)
         ex = snapshot_excludes(self.project.workspace)
         _write_excludes(self.project.workspace, ex)
+        _record_nested(self.project.workspace, ex.nested_repos)
         if ex.large_files or ex.dirs:
             # Anything tracked before it became skipped stays on disk but leaves the snapshot.
             subprocess.run(["git", "--literal-pathspecs", "-C", ws, "rm", "-r", "-q", "--cached",

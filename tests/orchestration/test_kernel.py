@@ -369,3 +369,44 @@ def test_out_of_quota_order_waits_without_a_fallback(tmp_path: Path) -> None:
     kernel.run_pending()
     assert kernel.ledger.orders()["wo-1"].status == "interrupted"
     assert set(kernel.unavailable()) == {"fake"} and kernel.fallback_for("fake") is None
+
+
+def test_snapshot_records_cloned_repositories_with_their_local_changes(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "-C", str(upstream), "init", "-q"], check=True)
+    (upstream / "model.py").write_text("x = 1\n")
+    subprocess.run([*git, "-C", str(upstream), "add", "-A"], check=True)
+    subprocess.run([*git, "-C", str(upstream), "commit", "-qm", "init"], check=True)
+
+    ex = FakeExecutor([WorkResult("done", "ok", session_id="s")])
+    kernel = make_kernel(tmp_path, ex)
+    ws = kernel.project.workspace
+    subprocess.run(["git", "clone", "-q", str(upstream), str(ws / "code" / "lib")], check=True)
+    (ws / "code" / "lib" / "model.py").write_text("x = 2\n")  # edited tracked file
+    (ws / "code" / "lib" / "chunk.py").write_text("new = True\n")  # new file
+    (ws / "code" / "lib" / "big.bin").write_bytes(b"\0" * (11 * 1024 * 1024))
+    kernel.submit(order())
+    kernel.run_pending()
+
+    started = next(e for e in kernel.ledger.events() if e.kind == "order.started")
+    assert started.payload["snapshot_excluded"]["nested_repos"] == ["code/lib"]
+    manifest = json.loads((ws / ".tar-lab" / "nested" / "manifest.json").read_text())
+    [repo] = manifest["repos"]
+    assert repo["remote"] == str(upstream) and repo["skipped_large"] == ["big.bin"]
+    committed = subprocess.run(["git", "-C", str(ws), "show", "--stat", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout
+    assert "code__lib.patch" in committed
+
+    restored = tmp_path / "restored"
+    subprocess.run(["git", "clone", "-q", repo["remote"], str(restored)], check=True)
+    subprocess.run(["git", "-C", str(restored), "checkout", "-q", repo["head"]], check=True)
+    subprocess.run(["git", "-C", str(restored), "apply", "--binary", str(ws / repo["patch"])],
+                   check=True)
+    assert (restored / "model.py").read_text() == "x = 2\n"
+    assert (restored / "chunk.py").read_text() == "new = True\n"
+    assert not (restored / "big.bin").exists()
+    status = subprocess.run(["git", "-C", str(ws / "code" / "lib"), "status", "--porcelain"],
+                            capture_output=True, text=True, check=True).stdout
+    assert "?? chunk.py" in status  # the clone's own index was not touched
