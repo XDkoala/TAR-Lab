@@ -1,6 +1,6 @@
 # TAR-Lab 架构设计
 
-状态：总体架构已确认（2026-11-17），需求依据见 `docs/requirements.md`（下文以 §n 引用其章节）。已实现：`integrations/ai_scientist`（引擎适配器）、`integrations/undermind`（MCP 客户端原型）；其余模块只有目录骨架。技术细节将通过最小原型验证后再定。
+状态：总体架构已确认（2026-11-17），需求依据见 `docs/requirements.md`（下文以 §n 引用其章节）。已实现：`integrations/ai_scientist`（引擎适配器）、`integrations/undermind`（MCP 客户端原型），以及账本、工单、内核和 Codex/Devin 执行者的最小原型（见“原型实测”）；其余模块只有目录骨架。技术细节将通过最小原型验证后再定。
 
 ## 总原则
 
@@ -137,6 +137,45 @@
 - 专家内部的执行方式可以自由选择，它们都只是执行者的一种实现。
 - 以上结论在最小原型对比中验证，必要时调整。
 
+## 原型实测（2026-11-17）
+
+已实现的最小底座：`core/ledger.py`（SQLite 账本）、`core/workorder.py`（工单、限额、结构化结果、执行者接口）、`orchestration/kernel.py`（快照、硬超时、半程提醒、重启恢复）、`integrations/cli_agents/`（Codex、Devin 执行者）、`agents/roles.py`（角色卡和工单提示词），以及命令行 `tarlab project init`、`tarlab order add|run|status|events`。
+
+### 执行者对比
+
+| 项 | Codex CLI（`gpt-6.1-sol` / medium） | Devin CLI（`claude-opus-5-5-medium`） |
+|---|---|---|
+| 非交互调用 | `codex exec --json`，提示词从 stdin 传入 | `devin -p --prompt-file` |
+| 结构化结果 | `--output-schema` 强制返回 JSON | 没有 schema 约束，回复里可能先有一段文字，从输出中提取最后一个合格的 JSON 对象 |
+| 会话 ID | 事件流的第一条（`thread.started`）就带有 | 运行结束前不输出；轮询 `devin list --format json`，约 4 秒后出现 |
+| 续接 | `codex exec resume <id>`，可用 | `devin -p -r <id>`，可用 |
+| 用量 | `turn.completed` 报告的是会话累计值 | 导出文件 `final_metrics` 里是会话累计值 |
+| 被杀尝试的用量 | 可以从 `~/.codex/sessions/**/rollout-*-<id>.jsonl` 里的 `token_count` 补回 | 导出文件只在一轮结束后写入，**补不回来** |
+| 最小任务（hello.py） | 18 秒，输入 5.8 万 token（其中 4.3 万命中缓存） | 11 秒，输入 3.9 万 token（其中 3.8 万命中缓存） |
+| 杀内核后恢复（素数筛工单） | 成功，2 次尝试，累计 17.6 万 token | 成功，2 次尝试，累计 12.8 万 token |
+
+两次恢复测试都是在执行者运行中途用 `kill -9` 杀掉内核：执行者随之退出（`setpriv --pdeathsig`），没有残留进程。重启后先把未完成的工单标为中断，再按会话 ID 续接，最后通过验收。
+
+### 主 Agent 唤醒成本
+
+用 Codex 读一份账本摘要（约 1.5 KB）并做一次验收决策：约 1.5 万 token，耗时 8 秒。同一张工单本身用了 17.6 万 token，所以“事件驱动、只在关键时刻唤醒”的成本可以接受。
+
+### 实测发现
+
+- **Codex 沙箱**：依赖 bwrap 和非特权用户命名空间，而 Ubuntu 24.04 默认禁止（`kernel.apparmor_restrict_unprivileged_userns=1`），连 `workspace-write` 也无法写文件。执行者默认改为 `--dangerously-bypass-approvals-and-sandbox`，由快照、硬超时和事后审计兜底。要恢复沙箱，需要用户用 sudo 调整 AppArmor 配置。
+- **不加载用户配置**：用 `--ignore-user-config` 跳过用户的插件和 MCP，每次调用的固定上下文从约 11 万 token 降到约 5.8 万。
+- **用量按会话累计**：两个 CLI 续接后报告的都是累计值。账本按会话记录最新累计值，订单总用量是各会话之和，不能把每次尝试的数字相加。
+- **Devin 宿主环境变量**：在 Devin Desktop 或 Windsurf 里启动的进程会继承 `ACP_BACKEND` 等变量，CLI 因此切换到宿主凭据模式，报告未登录。执行者启动前要清除这些变量（见 `HOST_ENV_VARS`）。
+- **Devin 修改了 `~/.bashrc`**：首次以已登录状态运行时，自动追加了一段把 `~/.local/bin` 加入 PATH 的配置块（带 `MANAGED DEVIN BLOCK` 标记）。
+- **耗时统计**：恢复时，被杀尝试的耗时按其最后一条账本事件或最后一次写文件的时间计算，防止少计限额。
+- **路径**：执行者在工作区内运行，传给它的所有路径都必须是绝对路径。
+
+### 已知不足
+
+- 同一个工作区里有多张 Devin 工单并行时，靠 `devin list` 识别新会话可能认错，需要按工单隔离工作目录。
+- 被杀的 Devin 尝试用量未知，只能按耗时计入限额。
+- 订阅制执行者只能按 token 和耗时计量，无法折算成美元。
+
 ## 引擎边界：AI-Scientist-v3
 
 AI-Scientist-v3 负责“给定任务 → 实验证据和论文”这一段：先构思，再迭代改进程序，接着做消融和事后分析，最后写论文。它擅长有明确评分函数的计算实验。它不负责选题、调研和跨项目规划。
@@ -189,7 +228,8 @@ AI-Scientist-v3 负责“给定任务 → 实验证据和论文”这一段：�
 
 ## 待定
 
-- 主 Agent 的具体模型组合（强模型做决策、便宜模型做巡查的搭配），待原型实测。
+- 主 Agent 的具体模型组合（强模型做决策、便宜模型做巡查的搭配）。单次唤醒的成本已经实测，模型搭配还要在真实项目上比较。
+- Devin 订阅条款是否允许大规模自动调用，以及额度够不够用（需要用户确认）。
 - 项目目录和账本的具体结构、工单与事件的数据格式。
 - 原版引擎副本的具体上游提交。
 - 止损和候选筛选规则的默认阈值。

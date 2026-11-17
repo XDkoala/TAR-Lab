@@ -14,7 +14,11 @@ from typing import Any
 
 import anyio
 
+from .core.ledger import Ledger, OrderState
+from .core.workorder import Executor, Limits, WorkOrder
 from .integrations.ai_scientist import load_run
+from .integrations.cli_agents.codex import CodexExecutor
+from .integrations.cli_agents.devin import DevinExecutor
 from .integrations.undermind import (
     FileTokenStorage,
     LoginRequiredError,
@@ -22,6 +26,7 @@ from .integrations.undermind import (
     UndermindClient,
     UndermindSettings,
 )
+from .orchestration.kernel import Kernel, Project
 
 
 def _print_json(data: Any) -> None:
@@ -86,6 +91,44 @@ def _engine_summary(run_dir: Path) -> int:
     return 0 if summary.completed else 1
 
 
+def _executors() -> dict[str, Executor]:
+    return {"codex": CodexExecutor(), "devin": DevinExecutor()}
+
+
+def _print_attention(kind: str, state: OrderState) -> None:
+    print(f"[attention] {state.order.id}: {kind} (status={state.status})", file=sys.stderr)
+
+
+def _kernel(root: Path) -> Kernel:
+    project = Project(root)
+    if not project.ledger_path.exists():
+        raise SystemExit(f"{root} is not a TAR-Lab project; run `tarlab project init` first")
+    return Kernel(project, Ledger(project.ledger_path), _executors(),
+                  on_attention=_print_attention)
+
+
+def _order_command(args: argparse.Namespace) -> int:
+    kernel = _kernel(args.project)
+    if args.command == "add":
+        kernel.submit(WorkOrder(
+            args.id, args.role, args.executor, args.goal, tuple(args.deliverable),
+            args.acceptance, Limits(int(args.minutes * 60), args.max_tokens)))
+        return 0
+    if args.command == "run":
+        kernel.run_pending()
+    states = kernel.ledger.orders()
+    if args.command == "events":
+        _print_json([{"seq": e.seq, "ts": e.ts, "kind": e.kind, "order": e.order_id,
+                      "payload": e.payload} for e in kernel.ledger.events(args.order)])
+        return 0
+    _print_json({oid: {"status": s.status, "attempts": s.attempts,
+                       "used_seconds": round(s.used_seconds, 1), "session_id": s.session_id,
+                       "usage": asdict(s.usage),
+                       "summary": s.result.summary if s.result else None}
+                 for oid, s in states.items()})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tarlab", description="TAR-Lab research platform")
     groups = parser.add_subparsers(dest="group", required=True)
@@ -111,6 +154,30 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command", required=True)
     summary = engine.add_parser("summary", help="summarize a run directory")
     summary.add_argument("run_dir", type=Path)
+
+    project = groups.add_parser("project", help="research projects").add_subparsers(
+        dest="command", required=True)
+    project.add_parser("init", help="create a project directory").add_argument(
+        "project", type=Path)
+
+    order = groups.add_parser("order", help="work orders").add_subparsers(
+        dest="command", required=True)
+    add = order.add_parser("add", help="submit a work order")
+    add.add_argument("project", type=Path)
+    add.add_argument("--id", required=True)
+    add.add_argument("--goal", required=True)
+    add.add_argument("--role", default="engineer")
+    add.add_argument("--executor", default="codex")
+    add.add_argument("--deliverable", action="append", default=[])
+    add.add_argument("--acceptance", default="The deliverables exist and work.")
+    add.add_argument("--minutes", type=float, default=10)
+    add.add_argument("--max-tokens", type=int)
+    for name, help_text in (("run", "run pending orders, resuming interrupted ones"),
+                            ("status", "show order states")):
+        order.add_parser(name, help=help_text).add_argument("project", type=Path)
+    events = order.add_parser("events", help="dump ledger events")
+    events.add_argument("project", type=Path)
+    events.add_argument("--order")
     return parser
 
 
@@ -120,6 +187,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.getLogger("mcp.client.auth").setLevel(logging.CRITICAL)
     if args.group == "engine":
         return _engine_summary(args.run_dir)
+    if args.group == "project":
+        project = Project(args.project)
+        project.init()
+        Ledger(project.ledger_path).close()
+        print(f"Project ready: {args.project}")
+        return 0
+    if args.group == "order":
+        return _order_command(args)
     settings = UndermindSettings.from_env()
     policy = ToolPolicy(mode="read_write" if getattr(args, "allow_write", False) else "read_only")
     try:
