@@ -98,6 +98,43 @@ class CodexExecutor:
                           tuple(report["deliverables"]), tuple(report["sources"]), **common)
 
 
+    def ask(self, prompt: str, schema: dict[str, Any], *, cwd: Path, log_dir: Path,
+            timeout: float = 900) -> tuple[dict[str, Any], Usage]:
+        """One fresh session that must answer with JSON matching ``schema``."""
+        cwd, log_dir = cwd.resolve(), log_dir.resolve()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        schema_path, last, prompt_path = (log_dir / "schema.json", log_dir / "answer.json",
+                                          log_dir / "prompt.md")
+        schema_path.write_text(json.dumps(schema))
+        prompt_path.write_text(prompt)
+        last.unlink(missing_ok=True)
+        usage = [Usage()]
+
+        def on_line(line: str) -> None:
+            if '"turn.completed"' in line:
+                usage[0] = _usage(json.loads(line).get("usage", {}))
+
+        attempt_cmd = [self.binary or find_codex(), "exec", "--json", "--ignore-user-config",
+                       "-m", self.model, "-c", f'model_reasoning_effort="{self.reasoning_effort}"',
+                       "--output-schema", str(schema_path), "-o", str(last),
+                       "--skip-git-repo-check", "-C", str(cwd)]
+        if self.sandbox == "bypass":
+            attempt_cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
+            attempt_cmd += ["-s", self.sandbox]
+        outcome = run_supervised(
+            [*attempt_cmd, "-"], cwd=cwd, stdin_path=prompt_path,
+            stdout_path=log_dir / "events.jsonl", stderr_path=log_dir / "stderr.log",
+            timeout=timeout, emit=lambda _kind, _payload: None, on_line=on_line)
+        try:
+            answer = json.loads(last.read_text())
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            detail = "timed out" if outcome.timed_out else tail(log_dir / "stderr.log")
+            raise RuntimeError(f"codex gave no JSON answer: {detail}") from exc
+        if not isinstance(answer, dict):
+            raise TypeError("codex answer is not a JSON object")
+        return answer, usage[0]
+
     def session_usage(self, session_id: str) -> Usage | None:
         home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
         usage = None

@@ -90,6 +90,14 @@ class Kernel:
                 processed.append(oid)
         return processed
 
+    def run_next(self) -> str | None:
+        """Run the oldest non-terminal order to completion; returns its id."""
+        for oid, state in self.ledger.orders().items():
+            if state.status in ("pending", "interrupted"):
+                self._run(state)
+                return oid
+        return None
+
     def _run(self, state: OrderState) -> None:
         order = state.order
         executor = self.executors[order.executor]

@@ -15,7 +15,10 @@ from typing import Any
 
 import anyio
 
+from .agents.main_agent import MainAgent, Question
+from .core.charter import Charter
 from .core.ledger import Ledger, OrderState
+from .core.machine import describe
 from .core.workorder import Executor, Limits, WorkOrder
 from .integrations.ai_scientist import AIScientistEngine, AIScientistExecutor, load_run
 from .integrations.cli_agents.codex import CodexExecutor
@@ -28,6 +31,7 @@ from .integrations.undermind import (
     UndermindSettings,
 )
 from .orchestration.kernel import Kernel, Project
+from .orchestration.lab import ConsoleNotifier, Lab, question_text
 
 
 def _print_json(data: Any) -> None:
@@ -137,6 +141,77 @@ def _kernel(root: Path) -> Kernel:
                   on_attention=_print_attention)
 
 
+def _lab(root: Path) -> Lab:
+    kernel = _kernel(root)
+    agent = MainAgent(CodexExecutor(), kernel.project.root, describe(kernel.project.root))
+    return Lab(kernel, agent, ConsoleNotifier())
+
+
+def _ask(q: Question) -> str:
+    print(f"\n{q.text}")
+    for option in q.options:
+        print(f"  - {option}")
+    return input(f"[默认 / default: {q.default}] > ")
+
+
+def _show_charter(charter: Charter) -> None:
+    print(f"\n== {charter.title}\n{charter.goal}\n"
+          f"venue: {charter.target_venue} | budget: ${charter.budget_usd:g} | "
+          f"deadline: {charter.deadline_hours:g} h | approvals: "
+          f"{', '.join(charter.approval_points) or '-'} | on timeout: {charter.on_timeout}\n"
+          f"constraints: {charter.constraints}\nrisks: {charter.risk_notes}")
+
+
+def _lab_command(args: argparse.Namespace) -> int:
+    if args.group == "new":
+        project = Project(args.project)
+        project.init()
+        Ledger(project.ledger_path).close()
+        lab = _lab(args.project)
+
+        def confirm(charter: Charter) -> bool:
+            _show_charter(charter)
+            return args.defaults or input("\n确认立项？/ Start? [Y/n] ").strip().lower() in (
+                "", "y", "yes", "是")
+
+        charter = lab.start(args.idea, ask=(lambda q: "") if args.defaults else _ask,
+                            confirm=confirm)
+        if charter is None:
+            print("Not started; run `tarlab new` again to redo the intake.")
+            return 1
+        print(f"\nProject ready. Run: tarlab run {args.project}")
+        return 0
+    lab = _lab(args.project)
+    if args.group == "run":
+        status = lab.run(poll_seconds=args.poll)
+        print(f"Project {status}.")
+        return 0 if status == "finished" else 1
+    if args.group == "reply":
+        lab.reply(args.qid, args.answer)
+        print(f"Answer recorded for {args.qid}.")
+        return 0
+    if args.group == "resume":
+        lab.resume()
+        print(f"Resumed. Run: tarlab run {args.project}")
+        return 0
+    if args.group == "inbox":
+        open_questions = lab.questions()
+        for qid, ev in open_questions.items():
+            print(question_text(qid, ev.payload) + "\n")
+        if not open_questions:
+            print("No open questions.")
+        return 0
+    charter = lab.charter()
+    if charter:
+        _show_charter(charter)
+    print(f"\nstatus: {lab.status() or 'active'}")
+    for oid, s in lab.ledger.orders().items():
+        print(f"  {oid:28} {s.status:15} {s.result.summary[:90] if s.result else ''}")
+    for qid in lab.questions():
+        print(f"  open question: {qid}")
+    return 0
+
+
 def _order_command(args: argparse.Namespace) -> int:
     kernel = _kernel(args.project)
     if args.command == "add":
@@ -197,6 +272,22 @@ def build_parser() -> argparse.ArgumentParser:
     compare = engine.add_parser("compare", help="final score, cost and time of several runs")
     compare.add_argument("run_dirs", type=Path, nargs="+")
 
+    new = groups.add_parser("new", help="start a research project from one sentence")
+    new.add_argument("project", type=Path)
+    new.add_argument("idea")
+    new.add_argument("--defaults", action="store_true", help="accept every default answer")
+    run = groups.add_parser("run", help="run a project until it finishes or is suspended")
+    run.add_argument("project", type=Path)
+    run.add_argument("--poll", type=float, default=30.0, help="seconds between checks")
+    for name, help_text in (("status", "show project state"),
+                            ("inbox", "list questions waiting for you"),
+                            ("resume", "resume a suspended project")):
+        groups.add_parser(name, help=help_text).add_argument("project", type=Path)
+    reply = groups.add_parser("reply", help="answer a question or approval")
+    reply.add_argument("project", type=Path)
+    reply.add_argument("qid")
+    reply.add_argument("answer")
+
     project = groups.add_parser("project", help="research projects").add_subparsers(
         dest="command", required=True)
     project.add_parser("init", help="create a project directory").add_argument(
@@ -241,6 +332,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.group == "order":
         return _order_command(args)
+    if args.group in ("new", "run", "status", "inbox", "reply", "resume"):
+        return _lab_command(args)
     settings = UndermindSettings.from_env()
     policy = ToolPolicy(mode="read_write" if getattr(args, "allow_write", False) else "read_only")
     try:
