@@ -508,11 +508,22 @@ def build_parser() -> argparse.ArgumentParser:
                             ("pause", "pause after the current work order"),
                             ("stop", "stop the running work order now and pause")):
         groups.add_parser(name, help=help_text).add_argument("project", type=Path)
-    tex = groups.add_parser("tex", help="LaTeX builds (Tectonic on the host)").add_subparsers(
-        dest="command", required=True)
+    tex = groups.add_parser(
+        "tex", help="LaTeX builds (local TeX Live latexmk/pdflatex; Tectonic as fallback)"
+    ).add_subparsers(dest="command", required=True)
     tex_build = tex.add_parser("build", help="compile a paper directory to PDF")
     tex_build.add_argument("paper_dir", type=Path)
     tex_build.add_argument("--main", default="main.tex")
+    tex_check = tex.add_parser(
+        "check", help="pre-submission check: clean-copy build, log, fonts, pages, "
+        "bibliography, optional anonymity; exit 1 on any FAIL")
+    tex_check.add_argument("paper_dir", type=Path)
+    tex_check.add_argument("--main", default="main.tex")
+    tex_check.add_argument("--page-limit", type=int, default=None,
+                           help="maximum pages including references")
+    tex_check.add_argument("--anonymous", action="store_true",
+                           help="flag author names, emails, GitHub links, acknowledgements")
+    tex_check.add_argument("--json", action="store_true", help="print JSON")
     svc = groups.add_parser("service", help="keep a project running as a systemd user service"
                             ).add_subparsers(dest="command", required=True)
     for name, help_text in (("install", "install, enable and start the service"),
@@ -588,8 +599,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_json(anyio.run(Literature().search, args.query, args.limit, args.year_from))
         return 0
     if args.group == "tex":
+        if args.command == "check":
+            from .tools.paper_check import check_paper
+
+            report = check_paper(args.paper_dir, args.main, args.page_limit, args.anonymous)
+            if args.json:
+                _print_json(report.to_dict())
+            else:
+                print(report.render())
+            return 0 if report.ok else 1
         result = build_tex(args.paper_dir, args.main)
-        print(f"PDF: {result.pdf}" if result.pdf else f"Build failed; see {result.log}")
+        print(f"PDF: {result.pdf} (engine: {result.engine})" if result.pdf
+              else f"Build failed; see {result.log}")
         return 0 if result.pdf else 1
     if args.group == "service":
         return _service_command(args)

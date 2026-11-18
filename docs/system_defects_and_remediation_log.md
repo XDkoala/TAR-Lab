@@ -89,6 +89,15 @@ Debian 将 /usr/share/texmf/web2c/texmf.cnf 链接至 /usr/share/texlive/texmf-d
 - **剩余风险**：不再与上游同步；原生运行时 Agent 与本机共享文件系统和登录状态，没有容器隔离，安全边界与 TAR-Lab 其他执行者相同。
 - **回退**：`git revert` 本次提交；上游原版仍在 `engines/ai-scientist-v3-original/`。
 
+## FIX-006 论文改用本机 TeX Live 编译并增加投稿前检查（2026-11-18）
+
+- **类别**：缺陷修复（构建环境与投稿环境不一致）。
+- **原因**：FIX-005 之后论文只用 Tectonic 编译。Tectonic 基于 XeTeX，而 arXiv 和会议系统用 TeX Live 的 `pdflatex`：字体加载和断行不同（例如 IEEEtran 在 `pdflatex` 下用 Times 类字体），本地页数、溢出和字体嵌入的结果不能代表投稿时的结果；也没有任何检查能发现未定义引用、未嵌入或 Type 3 字体、超页和匿名泄露。
+- **修改**：在 `../.tools/texlive/2026` 无 sudo 安装 TeX Live 2026（scheme-full，不含文档和源码，4.9 GB，清华 CTAN 镜像，安装命令见 README）。`tar_lab/tools/tex.py` 的引擎顺序改为本机 TeX Live（`latexmk -pdf -no-shell-escape`，可用 `TARLAB_TEXLIVE_BIN` 覆盖）→ `PATH` 上的 `latexmk`/`pdflatex` → Tectonic；`build.log` 第一行和 `TexBuild.engine` 写明所用引擎。新增 `tar_lab/tools/paper_check.py` 和 `tarlab tex check`：去掉编译产物后在临时副本中编译，检查日志（错误、未定义引用、缺失文件、>1pt overfull、字体替换）、`pdffonts`、`pdfinfo` 页数、`.bib` 键和字段，可选匿名检查，有 FAIL 时退出码为 1。写作和评审指南要求运行该检查。
+- **验证**：ruff、mypy、全部测试通过（新增 `tests/tools/`，需要真实 TeX 的测试在无安装时跳过）。IEEEtran 小论文：10 项全部 PASS，`pdffonts` 显示 NimbusRomNo9L（Times）全部嵌入，无需额外宏包。Project B 论文副本（`/tmp` 中）：编译通过，19 个字体全部嵌入、6 页；WARN 为 3 个 bib 条目缺年份和匿名检查（作者栏、引用的第三方 GitHub 链接）。人为加入未定义引用和缺失图片的副本被判为 FAIL，退出码 1。
+- **剩余风险**：arXiv 当前默认 TeX Live 2025，本机是 2026，个别宏包版本可能不同；匿名检查是关键词启发式，会把引用的第三方 GitHub 链接也报为 WARN；参考文献起始页只是尽力识别。
+- **回退**：`git revert` 本次提交；删除 `../.tools/texlive` 后会自动退回 `PATH` 上的 TeX 或 Tectonic。
+
 ## 自动修复能力的建设顺序
 
 1. 先让错误可复现、可分类，并有明确的输入输出约定。

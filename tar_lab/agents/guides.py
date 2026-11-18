@@ -11,6 +11,8 @@ from pathlib import Path
 # A complete engine task (task.md, evaluate.py, program_0/) to copy the layout from.
 ENGINE_EXAMPLE = (Path(__file__).resolve().parents[2] / "engines" / "ai-scientist-v3"
                   / "examples" / "circpack")
+# Official LaTeX templates per venue and year, each with a SOURCE.md (see its README.md).
+VENUE_TEMPLATES = Path(__file__).resolve().parents[2] / "templates" / "venues"
 
 _EVIDENCE = """\
 - Never invent results, numbers, citations, or links. If something failed or is unknown,
@@ -105,7 +107,11 @@ GUIDES: dict[str, str] = {
   decisions the user must make (each with the options and the recommendation). Point to
   `reports/topic_report.md` for details.
 - Reports go to `reports/` in the charter's report language; the paper goes to `paper/`
-  (`main.tex`, `refs.bib`, figures copied in) in the charter's paper language.
+  (`main.tex`, `refs.bib`, figures copied in) in the charter's paper language. Start it
+  from the target venue's official template in `{VENUE_TEMPLATES}` (its `README.md` and
+  the venue's `SOURCE.md` give the page limit and anonymity rules); if the venue is
+  absent, download the official template from the venue's own site and record its URL in
+  `paper/SOURCE.md`.
 - Every number in the paper must come from `results/` or `reports/analysis.md`; keep
   `paper/claims.md` mapping each claim to its source file. Use only citations from the
   survey reports and verify each one with the literature tools.
@@ -114,8 +120,13 @@ GUIDES: dict[str, str] = {
   scores are labelled as such.
 - Include limitations, compute used, and a statement that the work was produced with an
   automated research system. Build the PDF with:
-  `{sys.executable} -m tar_lab.cli tex build paper` (Tectonic on this machine; missing
-  LaTeX packages are fetched on first use; read `paper/build.log` on failure).
+  `{sys.executable} -m tar_lab.cli tex build paper` (TeX Live `latexmk`/`pdflatex` on
+  this machine, as arXiv and venues use, Tectonic only as a fallback; restricted shell escape only; read
+  `paper/build.log` on failure).
+- Before handing in the paper run
+  `{sys.executable} -m tar_lab.cli tex check paper` (add `--page-limit N` and `--anonymous`
+  as the target venue requires) and fix every FAIL; it builds a clean copy and checks the
+  log, embedded fonts, page count, bibliography and anonymity.
 {_EVIDENCE}""",
     "reviewer": f"""\
 - Topic review: first try to break each candidate. List at least three concrete ways its
@@ -129,6 +140,8 @@ GUIDES: dict[str, str] = {
   weaknesses, major and minor issues, questions, and an overall score (1-10) with the
   venue's usual meaning. Check that numbers match `results/`, that headline
   numbers come from the sealed final evaluation (`results/final/`), and that citations exist.
+  Run `{sys.executable} -m tar_lab.cli tex check paper` (with the venue's `--page-limit` and
+  `--anonymous` if it is double-blind) and include its result in the review.
   Write `reports/final_review.md`. Do not edit the paper.
 {_EVIDENCE}""",
 }

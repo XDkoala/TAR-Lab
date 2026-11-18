@@ -23,7 +23,7 @@ Trusted-Autonomous-Research-Lab/
 ├── TAR-Lab/        本仓库
 ├── runs/           实验运行结果（不进 Git）
 ├── deliverables/   交付快照（论文、报告、图表）
-└── .tools/         本地工具：node/、gh/、headless/（引擎启动 Agent 用）、tectonic/（编译论文）
+└── .tools/         本地工具：node/、gh/、headless/（引擎启动 Agent 用）、texlive/（编译论文）、tectonic/（备用）
 ```
 
 ## 开发
@@ -38,7 +38,35 @@ uv run ruff check . && uv run mypy src tests && uv run pytest -q -n auto
 
 本地工具（都在 `../.tools/`，不需要 sudo）：
 - `headless/`：引擎用它启动 Codex 等 Agent。安装：`git clone https://github.com/RobertTLange/headless-cli.git headless && git -C headless checkout 93cd9b06b85f848af1308c41e018991b33907c5e && cd headless && npm ci --ignore-scripts && npm run build && npm prune --omit=dev`（用 `.tools/node` 里的 Node）。
-- `tectonic/bin/tectonic`：编译论文 PDF，Tectonic 0.17.0（`tectonic-0.17.0-x86_64-unknown-linux-gnu.tar.gz`，SHA-256 `1a715688baf591e650c8aeb160ae934e181685eecbb38b317de30b269ac5d606`）。第一次编译会自动下载用到的 LaTeX 宏包，之后走缓存。也可以改用本机 TeX Live（`pdflatex`），或用 `TARLAB_TECTONIC` 指定路径。
+- `texlive/2026/`：编译论文 PDF 的首选，TeX Live 2026（scheme-full，不含文档和源码，安装后 4.9 GB；pdfTeX 1.40.29、latexmk 4.89）。arXiv 和各会议的投稿系统都用 TeX Live 的 `pdflatex`，本地用同一套才能得到一样的字体和排版（arXiv 目前默认 TeX Live 2025，也支持 2023）。`tarlab tex build` 在论文目录里运行 `latexmk -pdf -interaction=nonstopmode -halt-on-error -shell-restricted -file-line-error main.tex`（受限 shell-escape：只允许 TeX Live 白名单里的工具，如把 EPS 图转成 PDF 的 `repstopdf`），BibTeX/Biber 的重跑由 latexmk 负责。用 `TARLAB_TEXLIVE_BIN` 可以指定别的 `bin/<arch>` 目录；没有本地安装时用 `PATH` 上的 `latexmk`/`pdflatex`。安装（不需要 sudo，清华 CTAN 镜像，tlmgr 会校验每个包的校验和，约 30 分钟）：
+
+  ```bash
+  T=/path/to/Trusted-Autonomous-Research-Lab/.tools/texlive   # 改成实际的绝对路径
+  cd /tmp && curl -fsSLO https://mirrors.tuna.tsinghua.edu.cn/CTAN/systems/texlive/tlnet/install-tl-unx.tar.gz
+  tar xzf install-tl-unx.tar.gz && cd install-tl-2*/
+  cat > texlive.profile <<EOF
+  selected_scheme scheme-full
+  TEXDIR $T/2026
+  TEXMFLOCAL $T/2026/texmf-local
+  TEXMFSYSVAR $T/2026/texmf-var
+  TEXMFSYSCONFIG $T/2026/texmf-config
+  TEXMFVAR $T/2026/texmf-var
+  TEXMFCONFIG $T/2026/texmf-config
+  TEXMFHOME $T/texmf-home
+  binary_x86_64-linux 1
+  instopt_adjustpath 0
+  instopt_letter 0
+  tlpdbopt_autobackup 0
+  tlpdbopt_install_docfiles 0
+  tlpdbopt_install_srcfiles 0
+  EOF
+  ./install-tl --no-interaction -profile texlive.profile \
+    -repository https://mirrors.tuna.tsinghua.edu.cn/CTAN/systems/texlive/tlnet
+  ```
+
+  不建立 `/usr/local/bin` 符号链接，也不改 `PATH`；TAR-Lab 直接调用 `.tools/texlive/<年份>/bin/x86_64-linux`（有多个年份时用最新的）。
+- 投稿前检查：`tarlab tex check paper [--page-limit 8] [--anonymous] [--json]` 把论文目录（去掉 `.aux`、`.log`、`.bbl`、`main.pdf` 等编译产物）复制到临时目录重新编译，确认源码自包含，再检查：日志里的 LaTeX 错误、未定义的引用和交叉引用、缺失文件、超过 1pt 的 overfull \hbox、字体替换；`pdffonts` 是否全部嵌入、有没有 Type 3 字体；`pdfinfo` 页数（含参考文献）；`\cite` 的键是否都在 `.bib` 里、条目是否缺标题或年份；`--anonymous` 时查作者、邮箱、`github.com/<用户>` 链接和致谢。每项 PASS/WARN/FAIL/SKIP，有 FAIL 时退出码为 1；没装 poppler（`pdffonts` 等）时对应项为 SKIP。
+- `tectonic/bin/tectonic`：备用引擎，只在找不到 TeX Live 时使用。Tectonic 0.17.0（`tectonic-0.17.0-x86_64-unknown-linux-gnu.tar.gz`，SHA-256 `1a715688baf591e650c8aeb160ae934e181685eecbb38b317de30b269ac5d606`），基于 XeTeX，字体和断行可能与会议用的 `pdflatex` 不同；第一次编译会自动下载用到的宏包。可用 `TARLAB_TECTONIC` 指定路径。
 
 平台和引擎使用各自独立的环境。平台通过命令行和运行目录里的文件调用引擎，不导入引擎的 Python 代码。
 
@@ -97,6 +125,26 @@ uv run tarlab undermind tools          # 列出工具及权限判定（默认只
 uv run tarlab undermind call <tool> --args '{"key": "value"}'
 uv run tarlab engine summary ../runs/circpack/codex/20261116_143042   # 汇总一次引擎运行
 ```
+
+## 文献检索密钥
+
+Undermind 不可用时，Agent 用 `literature` 工具查 OpenAlex、Semantic Scholar 和 arXiv（`tarlab literature search "world models"` 可以手动试）。不配密钥也能用，但 Semantic Scholar 的匿名额度是所有匿名用户共享的，经常返回 429。
+
+- **Semantic Scholar 密钥**：在 <https://www.semanticscholar.org/product/api> 点 “Request an API Key” 申请（免费）。密钥给你独享的 1 次/秒（所有接口合计）。
+- **放在哪里**：后台服务（systemd 用户服务）和每张工单启动的文献服务进程不一定继承你 shell 里的环境变量，所以建议写进 `~/.config/tar-lab/literature.env`（遵循 `XDG_CONFIG_HOME`；也可用 `TARLAB_LITERATURE_ENV` 指定别的路径），格式和 `email.env` 一样，每行 `KEY=VALUE`，`#` 开头为注释，值可以加引号：
+
+  ```bash
+  mkdir -p ~/.config/tar-lab
+  cat > ~/.config/tar-lab/literature.env <<'ENV'
+  TARLAB_S2_API_KEY=你的密钥
+  # TARLAB_OPENALEX_API_KEY=...      # 可选，OpenAlex 密钥
+  # TARLAB_OPENALEX_MAILTO=you@example.org
+  ENV
+  chmod 600 ~/.config/tar-lab/literature.env
+  ```
+
+  支持的键：`TARLAB_S2_API_KEY`（或 `SEMANTIC_SCHOLAR_API_KEY`）、`TARLAB_OPENALEX_API_KEY`（或 `OPENALEX_API_KEY`）、`TARLAB_OPENALEX_MAILTO`。同名环境变量优先于文件。文件对其他用户可读时会在 stderr 提醒你 `chmod 600`；密钥本身不会写进日志。
+- **限速**：最多 3 张工单并行，各有自己的文献服务进程，所以本机所有进程共用一个限速器（`~/.local/state/tar-lab/rate/`，遵循 `XDG_STATE_HOME`）：Semantic Scholar 两次请求至少间隔 1.05 秒（有没有密钥都一样，可用 `TARLAB_S2_MIN_INTERVAL` 调整），arXiv 至少间隔 3 秒（`TARLAB_ARXIV_MIN_INTERVAL`）。遇到 429/503 时按服务器的 `Retry-After` 等待（最多 60 秒），没有这个头就指数退避。
 
 ## 引擎与上游
 

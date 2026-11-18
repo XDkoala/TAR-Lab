@@ -27,5 +27,6 @@ def describe(root: Path) -> str:
         f"- OS: {platform.system()} {platform.release()}; CPU threads: {os.cpu_count()}",
         *(f"- GPU: {g}" for g in gpu_lines),
         f"- Free disk at the project: {free_gb:.0f} GB",
-        "- LaTeX builds use Tectonic on the host; network access is allowed.",
+        ("- LaTeX builds use TeX Live (latexmk/pdflatex) on the host, Tectonic as fallback; "
+         "network access is allowed."),
     ])

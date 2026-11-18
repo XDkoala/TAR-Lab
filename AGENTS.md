@@ -10,4 +10,5 @@
 - `engines/ai-scientist-v3` is a trimmed fork (investigation loop only, native, no Docker) and no longer tracks upstream.
   Its checks: `cd engines/ai-scientist-v3 && env -u PYTHONPATH .venv/bin/ruff check src tests && env -u PYTHONPATH
   .venv/bin/mypy src tests && env -u PYTHONPATH .venv/bin/pytest -q -n 8 -p no:cacheprovider tests`.
-- Engine agents launch through `../.tools/headless/dist/cli.js`; PDFs build with `../.tools/tectonic/bin/tectonic`.
+- Engine agents launch through `../.tools/headless/dist/cli.js`; PDFs build with the TeX Live in
+  `../.tools/texlive/<year>` (`latexmk`), falling back to `../.tools/tectonic/bin/tectonic`.
