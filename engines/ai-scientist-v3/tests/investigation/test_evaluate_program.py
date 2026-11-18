@@ -9,7 +9,6 @@ import subprocess
 import sys
 import textwrap
 import time
-import types
 from pathlib import Path
 from typing import Any, Callable
 
@@ -411,32 +410,6 @@ with open(os.path.join(here, "_results.json"), "w") as f:
 """
 
 
-def test_grpo_successful_run_scores_accuracy_and_missing_snapshot_fails_before_running(grpo_evaluate, task_tree, tmp_path, capsys) -> None:
-    # a successful run scores accuracy and keeps the program directory pristine
-    program = _grpo_program(tmp_path / "ok", RESULT_WRITING_PROGRAM)
-    results = tmp_path / "ok" / "results"
-    metrics, correct, message = grpo_evaluate.run_program(str(program), str(results))
-    assert correct is True
-    assert message == "Training completed successfully."
-    assert metrics["combined_score"] == 0.5
-    assert metrics["public"] == {"final_accuracy": 0.5, "num_epochs": 1, "final_eval_accuracy": 0.5, "final_train_loss": 1.0}
-    assert json.loads((results / "correct.json").read_text()) == {"correct": True}
-    assert json.loads((results / "metrics.json").read_text())["combined_score"] == 0.5
-    assert not (program.parent / "_results.json").exists()
-    console = capsys.readouterr().out
-    assert "epoch 1 eval/accuracy 0.5" in console
-    assert "training\n" not in console
-    assert (results / "program_stdout.log").read_text() == "training\nepoch 1 eval/accuracy 0.5\n"
-
-    # a missing model snapshot fails before running the program
-    (task_tree / "resources" / "Qwen2.5-Math-1.5B" / "config.json").unlink()
-    program = _grpo_program(tmp_path / "missing", "raise SystemExit('must not run')\n")
-    results = tmp_path / "missing" / "results"
-    metrics, correct, message = grpo_evaluate.run_program(str(program), str(results))
-    assert correct is False
-    assert metrics["combined_score"] == 0.0
-    assert "download_model.py" in message
-    assert json.loads((results / "correct.json").read_text())["error"] == message
 
 
 _GRPO_FAILURES = [
@@ -447,25 +420,6 @@ _GRPO_FAILURES = [
 ]
 
 
-def test_grpo_program_failures_are_recorded_and_console_echo_stays_within_budget(grpo_evaluate, task_tree, tmp_path, capsys) -> None:
-    # program failures are recorded with their cause
-    for name, body, expected_message, stderr_contains, kwargs in _GRPO_FAILURES:
-        root = tmp_path / name
-        program = _grpo_program(root, body)
-        metrics, correct, message = grpo_evaluate.run_program(str(program), str(root / "results"), **kwargs)
-        assert correct is False, name
-        assert expected_message in message, name
-        assert metrics["combined_score"] == 0.0, name
-        captured = capsys.readouterr()
-        if stderr_contains is not None:
-            assert stderr_contains in captured.err, name
-
-    # console echo stays within budget while the full log is kept
-    root = tmp_path / "budget"
-    body = "for i in range(5000):\n    print(f'epoch {i} ' + 'x' * 100)\nraise SystemExit(0)\n"
-    grpo_evaluate.run_program(str(_grpo_program(root, body)), str(root / "results"))
-    assert len(capsys.readouterr().out) < grpo_evaluate.CONSOLE_ECHO_BUDGET_BYTES + 2048
-    assert (root / "results" / "program_stdout.log").stat().st_size > 500_000
 
 
 _MALFORMED_GRPO_RESULTS = [
@@ -478,46 +432,5 @@ _MALFORMED_GRPO_RESULTS = [
 ]
 
 
-def test_grpo_helpers_resolve_environment_task_dir_layout_and_validate_results(grpo_evaluate, task_tree, tmp_path, monkeypatch) -> None:
-    # the program environment targets task resources
-    monkeypatch.setenv("PYTHONPATH", "/elsewhere")
-    env = grpo_evaluate.program_environment(tmp_path / "scratch")
-    assert env["PYTHONPATH"] == str(task_tree / "grpo_utils" / "src")
-    assert env["GRPO_MODEL_PATH"] == str(task_tree / "resources" / "Qwen2.5-Math-1.5B")
-    assert env["HF_HUB_OFFLINE"] == "1"
-    assert env["HF_HOME"] == str(tmp_path / "scratch" / "hf")
-
-    # the task dir falls back to the evaluator directory
-    with monkeypatch.context() as context:
-        context.setenv("TASK_SOURCE_DIR", str(tmp_path / "not-a-task"))
-        assert grpo_evaluate.task_dir() == GRPO_DIR
-
-    # malformed results are rejected
-    for parsed, reason in _MALFORMED_GRPO_RESULTS:
-        correct, message = grpo_evaluate.validate_result(parsed)
-        assert correct is False, reason
-        assert reason in message, reason
-
-    # a program layout without a spec uses the entrypoint directory
-    program = tmp_path / "loose" / "program.py"
-    program.parent.mkdir()
-    program.write_text("")
-    assert grpo_evaluate.resolve_program_layout(str(program)) == (program.parent, "program.py")
 
 
-def test_grpo_validation_split_cli_reads_archived_train_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    torch_data_module = types.ModuleType("torch.utils.data")
-    torch_data_module.DataLoader = object  # type: ignore[attr-defined]
-    torch_data_module.Dataset = object  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
-    monkeypatch.setitem(sys.modules, "torch.utils", types.ModuleType("torch.utils"))
-    monkeypatch.setitem(sys.modules, "torch.utils.data", torch_data_module)
-
-    data_path = GRPO_DIR / "grpo_utils" / "src" / "grpo_utils" / "data.py"
-    spec = importlib.util.spec_from_file_location("grpo_data_under_test", data_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    assert module.TRAIN_PATH.name == "_train.jsonl"
-    assert module.TRAIN_PATH.exists()

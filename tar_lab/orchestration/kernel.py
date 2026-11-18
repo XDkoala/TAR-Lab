@@ -33,11 +33,9 @@ _GIT_ID = ("-c", "user.name=TAR-Lab", "-c", "user.email=tar-lab@localhost")
 # Snapshots track what agents write by hand (code, configs, reports, small results). Rebuildable
 # environments and caches, and large files such as datasets, wheels and checkpoints, would make
 # every snapshot copy gigabytes into git; they are listed in the ledger instead.
-# ``.agent_home`` is the AI-Scientist-v3 container's home directory: it holds a copy of the
-# Codex login (``.codex/auth.json``), which must never be committed.
 SNAPSHOT_SKIP_DIRS = frozenset({".git", ".venv", "venv", ".cache", "__pycache__", "node_modules",
                                 ".mypy_cache", ".pytest_cache", ".ruff_cache",
-                                ".ipynb_checkpoints", ".agent_home"})
+                                ".ipynb_checkpoints"})
 SNAPSHOT_MAX_FILE_BYTES = 10 * 1024 * 1024
 # How long an executor that reported an exhausted quota or rate limit is left alone.
 EXECUTOR_COOLDOWN = timedelta(minutes=30)

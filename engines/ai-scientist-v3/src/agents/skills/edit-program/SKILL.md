@@ -13,7 +13,7 @@ Create the next program variant safely for iterative optimization experiments.
 # What to do
 1. Find the next unused program index `<idx>` from `{{RESULTS_DIR}}/program_<idx>`.
 2. Clone the full previous program project (`program_<idx-1>`) into the new `program_<idx>` with the trusted clone utility:
-   - `${TASK_PYTHON:-$WRAPPER_PYTHON} -I -m src.investigation.program_clone --from "{{RESULTS_DIR}}/program_<idx-1>" --to "{{RESULTS_DIR}}/program_<idx>"`
+   - `$WRAPPER_PYTHON -I -m src.investigation.program_clone --from "{{RESULTS_DIR}}/program_<idx-1>" --to "{{RESULTS_DIR}}/program_<idx>"`
    - The utility creates the destination and applies the `program_spec.toml` copy rules without carrying evaluator artifacts.
    - For every source after `program_0`, the utility refuses to clone until canonical evaluation and mirrored rubric artifacts prove the previous iteration is complete.
    - Do not use `cp`, `cp -r`, `cp -a`, `rsync`, or any other recursive copy. If the trusted clone fails, stop the attempt and report the error; do not fall back to another clone method.
@@ -30,6 +30,6 @@ Create the next program variant safely for iterative optimization experiments.
 
 # Example usage
 ```bash
-${TASK_PYTHON:-$WRAPPER_PYTHON} -I -m src.investigation.program_clone --from "{{RESULTS_DIR}}/program_2" --to "{{RESULTS_DIR}}/program_3"
+$WRAPPER_PYTHON -I -m src.investigation.program_clone --from "{{RESULTS_DIR}}/program_2" --to "{{RESULTS_DIR}}/program_3"
 # edit {{RESULTS_DIR}}/program_3/src/** (and {{RESULTS_DIR}}/program_3/program_spec.toml if needed)
 ```

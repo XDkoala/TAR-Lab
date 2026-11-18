@@ -27,5 +27,5 @@ def describe(root: Path) -> str:
         f"- OS: {platform.system()} {platform.release()}; CPU threads: {os.cpu_count()}",
         *(f"- GPU: {g}" for g in gpu_lines),
         f"- Free disk at the project: {free_gb:.0f} GB",
-        "- Docker is available for TeX builds; network access is allowed.",
+        "- LaTeX builds use Tectonic on the host; network access is allowed.",
     ])

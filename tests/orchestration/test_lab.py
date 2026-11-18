@@ -559,7 +559,7 @@ def test_engine_order_needs_a_complete_task_then_runs_on_the_engine(tmp_path: Pa
     assert st.order.executor == "ai-scientist" and st.order.role == "engineer" and engine.seen
     assert st.order.params["task_dir"] == str((ws / "engine_tasks" / "pack").resolve())
     assert st.order.params["results_root"] == str(ws / "engine_runs")
-    assert st.order.params["overrides"]["investigation.execution.max_idea_cycles"] == 3
+    assert st.order.params["cycles"] == 3
 
 
 @dataclass

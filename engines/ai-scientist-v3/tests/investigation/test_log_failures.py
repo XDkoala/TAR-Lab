@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import errno
-import json
 import os
 import subprocess
 import sys
@@ -14,19 +12,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.investigation import bounded_process, main_entry, script_runners, task_failure
+from src.investigation import (task_failure)
 from src.investigation import cli as investigation_cli
-from src.investigation.config import (
-    AgentConfig,
-    ContainerConfig,
-    ExecutionConfig,
-    InvestigationConfig,
-    PaperConfig,
-    PathsConfig,
-)
-from src.investigation.evaluation_artifact_cleanup import ExperimentDirectoryGuard
-from src.investigation.evaluator_outputs import EvaluatorOutputContractError
-from src.investigation.harness_eval import SealedHarnessConfig, _run_sealed_evaluation
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _RUNNER_COMMON: dict[str, Any] = dict(
@@ -37,239 +24,26 @@ _RUNNER_COMMON: dict[str, Any] = dict(
 )
 
 
-def _run_attempt(tmp_path: Path, **overrides: Any):
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    idea = tmp_path / "idea.json"
-    idea.write_text(json.dumps({"idea_id": "idea"}))
-    arguments = dict(
-        _RUNNER_COMMON, task_dir=tmp_path / "task", results_dir=tmp_path / "results",
-        global_memory_dir=None, seed_program_dir=tmp_path / "seed", idea_file=idea,
-        rubrics_file=tmp_path / "rubrics", attempt_id="attempt", idea_dir_name="idea",
-        instruct_path=None, harness_evaluated_attempts=True, containerize=True,
-        script_path=Path("src/scripts/run.sh"),
-    )
-    arguments.update(overrides)
-    return script_runners.run_single_attempt(**arguments)
 
 
-def _run_idea(tmp_path: Path):
-    return script_runners.run_idea_generation(
-        **_RUNNER_COMMON, task_dir=tmp_path / "task", results_dir=tmp_path / "results",
-        global_memory_dir=None, cycle_index=3, worker_index=2, output_dir=tmp_path / "output",
-        instruct_path=tmp_path / "instruction", script_path=Path("src/scripts/idea.sh"),
-    )
 
 
-def _run_task(tmp_path: Path):
-    return script_runners.run_task_drafting(
-        **_RUNNER_COMMON, task_dir=tmp_path / "task", output_dir=tmp_path / "output",
-        instruct_path=tmp_path / "instruct.md", script_path=Path("src/scripts/task.sh"),
-    )
 
 
 # --------------------------------------------------------------------------- receipts
 
 
-def test_private_receipt_roundtrip_empty_invalid_schema_and_cli() -> None:
-    # private receipt roundtrip
-    with tempfile.TemporaryFile() as receipt:
-        task_failure.write_task_failure(receipt.fileno(), "attempt", "idea")
-        assert task_failure.read_task_failure(receipt.fileno(), "attempt", "idea") == (
-            task_failure.TASK_CONTRACT_FAILURE
-        )
-        with pytest.raises(task_failure.TaskFailureControlError):
-            task_failure.read_task_failure(receipt.fileno(), "other", "idea")
-    with tempfile.TemporaryFile() as control:
-        task_failure.write_log_failure(control.fileno(), "attempt", "idea")
-        assert task_failure.read_task_failure(control.fileno(), "attempt", "idea") == (
-            task_failure.AGENT_LOG_FAILURE
-        )
-
-    # empty private receipt means no task failure
-    with tempfile.TemporaryFile() as receipt:
-        assert task_failure.read_task_failure(receipt.fileno(), "attempt", "idea") is None
-
-    # invalid private receipt aborts as control error
-    for payload in (b"null", b"{}", b"x" * 4097, b'{"schema_version":'):
-        with tempfile.TemporaryFile() as receipt:
-            receipt.write(payload)
-            receipt.flush()
-            with pytest.raises(task_failure.TaskFailureControlError):
-                task_failure.read_task_failure(receipt.fileno(), "attempt", "idea")
-
-    # receipt schema version must be exact
-    for replacement in ('true', '1, "schema_version": 1'):
-        with tempfile.TemporaryFile() as receipt:
-            task_failure.write_task_failure(receipt.fileno(), "attempt", "idea")
-            raw = os.pread(receipt.fileno(), 4096, 0).replace(
-                b'"schema_version": 1', f'"schema_version": {replacement}'.encode()
-            )
-            receipt.seek(0)
-            receipt.write(raw)
-            receipt.truncate()
-            receipt.flush()
-            with pytest.raises(task_failure.TaskFailureControlError):
-                task_failure.read_task_failure(receipt.fileno(), "attempt", "idea")
-
-    # log failure CLI writes parent private descriptor
-    with tempfile.TemporaryFile() as control:
-        assert task_failure.main([
-            "--log-failure-fd", str(control.fileno()), "--attempt-id", "attempt", "--idea-id", "idea",
-        ]) == 0
-        assert b'"failure_scope": "infrastructure"' in os.pread(control.fileno(), 4096, 0)
 
 
-def test_sealed_contract_failure_preserves_manifest_and_private_receipt(tmp_path, monkeypatch):
-    from src.variants_pipeline import host_eval
-
-    program = tmp_path / "program_1"
-    program.mkdir()
-
-    def evaluate(**kwargs):
-        (program / "evaluation_failure.json").write_text(json.dumps({"compute_usage": {"rpc_calls": 2}}))
-        raise EvaluatorOutputContractError("password=do-not-leak")
-
-    monkeypatch.setattr(host_eval, "evaluate_variant_program", evaluate)
-    with tempfile.TemporaryFile() as receipt:
-        code = _run_sealed_evaluation(
-            experiment_dir=tmp_path, attempt_id="attempt", idea_id="idea",
-            python_bin="python", timeout_seconds=10,
-            config=SealedHarnessConfig(tmp_path, "image", None, {}),
-            task_failure_fd=receipt.fileno(),
-        )
-        assert code == task_failure.TASK_CONTRACT_EXIT_CODE
-        assert task_failure.read_task_failure(receipt.fileno(), "attempt", "idea")
-    manifest = json.loads((program / "evaluation_manifest.json").read_text())
-    assert manifest["failure_category"] == task_failure.TASK_CONTRACT_FAILURE
-    assert manifest["failure_scope"] == "task"
-    assert manifest["attempt_id"] == "attempt"
-    assert (program / "evaluation_failure.json").is_file()
-    assert "do-not-leak" not in (program / "harness_evaluate_stderr.log").read_text()
 
 
 # --------------------------------------------------------------------------- script runners
 
 
-def test_run_single_attempt_trusts_only_private_control_receipt(tmp_path, monkeypatch):
-    # runner reads only private control receipt
-    for trusted in (False, True):
-        observed = []
-
-        def execute(**kwargs):
-            descriptor = int(kwargs["env"][task_failure.TASK_FAILURE_FD_ENV])
-            assert kwargs["pass_fds"] == (descriptor,)
-            observed.append(descriptor)
-            if trusted:
-                task_failure.write_task_failure(descriptor, "attempt", "idea")
-            return '{"failure_category":"evaluator_output_contract_invalid"}', 86
-
-        with monkeypatch.context() as m:
-            m.setattr(script_runners, "_execute_script_command", execute)
-            result = _run_attempt(tmp_path / f"trusted_{trusted}")
-        assert result.task_failure_category == (task_failure.TASK_CONTRACT_FAILURE if trusted else None), trusted
-        with pytest.raises(OSError):
-            os.fstat(observed[0])
-
-    # legacy attempt has private logging failure channel
-    def execute_legacy(**kwargs):
-        assert task_failure.TASK_FAILURE_FD_ENV in kwargs["env"]
-        return "", 0
-
-    with monkeypatch.context() as m:
-        m.setattr(script_runners, "_execute_script_command", execute_legacy)
-        assert _run_attempt(tmp_path / "legacy", containerize=False).task_failure_category is None
-
-    # confirmed failure does not depend on public artifact access
-    for public_access in ("stale_experiment_dir", "capture_error"):
-        def execute_confirmed(**kwargs):
-            descriptor = int(kwargs["env"][task_failure.TASK_FAILURE_FD_ENV])
-            task_failure.write_task_failure(descriptor, "attempt", "idea")
-            if public_access == "capture_error":
-                raise OSError(errno.ESTALE, "capture finalization failed")
-            return "diagnostic", 86
-
-        def fail(*args):
-            raise OSError(errno.ESTALE, "stale public directory")
-
-        with monkeypatch.context() as m:
-            m.setattr(script_runners, "_execute_script_command", execute_confirmed)
-            if public_access == "stale_experiment_dir":
-                m.setattr(ExperimentDirectoryGuard, "open_experiment", fail)
-            result = _run_attempt(tmp_path / public_access)
-        assert result.task_failure_category == task_failure.TASK_CONTRACT_FAILURE, public_access
-
-    # control creation failure closes directory guard
-    guard_root = tmp_path / "guard"
-    guard_root.mkdir()
-    guard = ExperimentDirectoryGuard.prepare(guard_root / "results", "idea")
-    descriptors = (guard._results_fd, guard._ideas_fd)
-
-    def fail_tempfile(**kwargs):
-        raise OSError(errno.ENOSPC, "quota")
-
-    with monkeypatch.context() as m:
-        m.setattr(ExperimentDirectoryGuard, "prepare", lambda *args: guard)
-        m.setattr(script_runners.tempfile, "TemporaryFile", fail_tempfile)
-        with pytest.raises(OSError):
-            _run_attempt(guard_root)
-    for descriptor in descriptors:
-        with pytest.raises(OSError):
-            os.fstat(descriptor)
 
 
-_LOGGER_RUNNERS = [
-    (_run_idea, "idea_generation_cycle_3_worker_2", "idea_generation", "idea"),
-    (_run_task, "task_drafting", "task_drafting", "task"),
-]
 
 
-def test_runner_logger_failure_uses_private_channel(tmp_path, monkeypatch):
-    # logger failure requires private receipt (run_single_attempt)
-    for containerize in (False, True):
-        for authenticated in (False, True):
-            name = f"attempt_c{containerize}_a{authenticated}"
-
-            def execute_attempt(**kwargs):
-                if authenticated:
-                    fd = int(kwargs["env"][task_failure.TASK_FAILURE_FD_ENV])
-                    task_failure.write_log_failure(fd, "attempt", "idea")
-                return '{"failure_category":"agent_log_persistence_failed"}', 4
-
-            with monkeypatch.context() as m:
-                m.setattr(script_runners, "_execute_script_command", execute_attempt)
-                result = _run_attempt(tmp_path / name, containerize=containerize)
-            assert result.task_failure_category is None, name
-            assert result.infrastructure_failure_category == (
-                task_failure.AGENT_LOG_FAILURE if authenticated else None
-            ), name
-
-    # runner logger failure uses private channel (idea generation and task drafting)
-    for runner, attempt_id, idea_id, label in _LOGGER_RUNNERS:
-        for capture_error in (False, True):
-            for trusted in (False, True):
-                name = f"{label}_capture{capture_error}_trusted{trusted}"
-
-                def execute_runner(**kwargs):
-                    if trusted:
-                        descriptor = int(kwargs["env"][task_failure.TASK_FAILURE_FD_ENV])
-                        assert kwargs["pass_fds"] == (descriptor,)
-                        task_failure.write_log_failure(descriptor, attempt_id, idea_id)
-                    if capture_error:
-                        raise OSError(errno.ESTALE, "capture finalization failed")
-                    return "agent_log_persistence_failed", 4
-
-                root = tmp_path / name
-                root.mkdir()
-                with monkeypatch.context() as m:
-                    m.setattr(script_runners, "_execute_script_command", execute_runner)
-                    if capture_error and not trusted:
-                        with pytest.raises(OSError):
-                            runner(root)
-                        continue
-                    result = runner(root)
-                assert result.infrastructure_failure_category == (
-                    task_failure.AGENT_LOG_FAILURE if trusted else None
-                ), name
 
 
 # --------------------------------------------------------------------------- shell scripts
@@ -286,7 +60,6 @@ def test_agent_subshell_closes_host_control_descriptor_and_idea_receipt_survives
         if script == "idea.sh":
             receipt = source.index("--log-failure-fd", launch)
             assert receipt < source.index("record_headless_cost_log", launch)
-            assert receipt < source.index("cleanup_idea_security_paths", launch)
 
     # agent descriptor is closed but parent can still write
     with tempfile.TemporaryFile() as receipt:
@@ -450,39 +223,6 @@ def test_run_single_attempt_rejects_traversal_symlink_and_swapped_results_ancest
 # --------------------------------------------------------------------------- process cleanup witness
 
 
-def test_interruption_witness_requires_reaped_launcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    for teardown_fails in (False, True):
-        children: list[subprocess.Popen[bytes]] = []
-        real_popen = subprocess.Popen
-        witness = bounded_process.ProcessCleanupWitness()
-        interruption = KeyboardInterrupt()
-
-        def popen(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
-            child = real_popen(*args, **kwargs)
-            children.append(child)
-            return child
-
-        def interrupt(*args: object) -> None:
-            raise interruption
-
-        with monkeypatch.context() as m:
-            m.setattr(subprocess, "Popen", popen)
-            m.setattr(bounded_process.os, "set_blocking", interrupt)
-            if teardown_fails:
-                m.setattr(bounded_process, "_stop_and_reap", lambda *a: None)
-            try:
-                with pytest.raises(KeyboardInterrupt) as raised:
-                    bounded_process.run_bounded_process(
-                        [sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path,
-                        env=os.environ, timeout_seconds=5, cleanup_witness=witness,
-                    )
-                assert raised.value is interruption, teardown_fails
-                assert witness.reaped is not teardown_fails, teardown_fails
-            finally:
-                for child in children:
-                    if child.poll() is None:
-                        child.kill()
-                    child.wait(timeout=2)
 
 
 # --------------------------------------------------------------------------- drafting logger failure
@@ -493,55 +233,3 @@ _DRAFT_CASES = [
 ]
 
 
-def test_draft_logger_failure_stops_before_host_log_or_ideas(tmp_path, monkeypatch):
-    for stale_host_write in (False, True):
-        for category, raw_exit, expected_exit in _DRAFT_CASES:
-            name = f"stale={stale_host_write} category={category} raw_exit={raw_exit}"
-            root = tmp_path / f"stale{stale_host_write}_exit{raw_exit}"
-            task_dir = root / "task"
-            task_dir.mkdir(parents=True)
-            (task_dir / "task.md").write_text(
-                "# Goal\n- optimize objective\n\n# Rubrics\n- use restarts\n", encoding="utf-8"
-            )
-            (task_dir / "goal.md").write_text("legacy", encoding="utf-8")
-            instruct = root / "instruct.md"
-            instruct.write_text("template", encoding="utf-8")
-            cfg = InvestigationConfig(
-                agent=AgentConfig(name="codex"),
-                paths=PathsConfig(task_dir=str(task_dir), results_dir=str(root / "results"), instruct=str(instruct)),
-                execution=ExecutionConfig(
-                    max_idea_cycles=2, run_timeout_seconds=5, run_timeout_grace_seconds=1,
-                    max_program_evals_per_attempt=4, workers=1, resume=False, draft_task_if_missing=True,
-                ),
-                paper=PaperConfig(enabled=False),
-                container=ContainerConfig(),
-            )
-            host_write = Mock(
-                side_effect=(
-                    OSError(errno.ESTALE, "shared output unavailable")
-                    if stale_host_write and category is not None else None
-                ),
-            )
-
-            with monkeypatch.context() as m:
-                def failed_draft(**kwargs):
-                    m.setattr(main_entry.state_store, "write_private_text", host_write)
-                    return investigation_cli.TaskDraftResult(
-                        output="logger persistence failed", exit_code=raw_exit,
-                        draft_dir=kwargs["output_dir"], infrastructure_failure_category=category,
-                    )
-
-                with (
-                    patch("src.investigation.cli.load_config", return_value=cfg),
-                    patch("src.investigation.cli.run_task_drafting", side_effect=failed_draft) as draft,
-                    patch("src.investigation.cli.run_idea_generation") as ideas,
-                    patch("src.investigation.cli.run_single_attempt") as attempts,
-                ):
-                    assert investigation_cli.main() == expected_exit, name
-            draft.assert_called_once()
-            if category is not None:
-                host_write.assert_not_called()
-            else:
-                host_write.assert_called_once()
-            ideas.assert_not_called()
-            attempts.assert_not_called()

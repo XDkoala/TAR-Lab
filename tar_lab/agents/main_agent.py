@@ -103,8 +103,8 @@ Rules:
   variant, an architecture or hyperparameter search, beating a baseline on a benchmark), not
   for analysis questions without a score to improve. First dispatch an engineer "work" order
   that builds the task directory (see the engineer's guide); the platform rejects an engine
-  order whose task is incomplete. Engine runs use the CPU only (Docker, no GPU); the engine
-  scores on its own evaluator, so the result is a candidate for the final evaluation, not a
+  order whose task is incomplete. Engine runs execute on this machine like other orders
+  (GPU included, one GPU order at a time); the engine scores on its own evaluator, so the result is a candidate for the final evaluation, not a
   final number. Leave `task_dir` empty for other kinds.
 - Sealed final evaluation: the plan fixes, before development starts, a held-out split or
   seeds and a protocol that development never touches. When the candidate methods are

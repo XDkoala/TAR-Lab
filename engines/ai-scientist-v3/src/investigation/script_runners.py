@@ -1,4 +1,4 @@
-"""Script invocation helpers for idea, run, paper, and task steps."""
+"""Script invocation helpers for idea and attempt steps."""
 
 from __future__ import annotations
 
@@ -6,24 +6,16 @@ import io
 import json
 import os
 import selectors
-import secrets
 import stat
 import subprocess
 import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Optional, Sequence, Union, cast
+from typing import BinaryIO, Callable, Optional, Union, cast
 
 from .constants import (
-    DEFAULT_CONTAINER_IMAGE,
-    DEFAULT_CONTAINER_NETWORK,
-    DEFAULT_HARNESS_EVALUATION_TIMEOUT_SECONDS,
     DEFAULT_MAX_PROGRAM_EVALS_PER_ATTEMPT,
-    DEFAULT_PAPER_MAX_REFS,
-    DEFAULT_PAPER_MAX_REPAIR_ROUNDS,
-    DEFAULT_PAPER_MIN_REFS,
-    DEFAULT_PAPER_TIMEOUT_GRACE_SECONDS,
     DEFAULT_RUN_TIMEOUT_GRACE_SECONDS,
 )
 from .evaluation_artifact_cleanup import (
@@ -31,28 +23,17 @@ from .evaluation_artifact_cleanup import (
     cleanup_unmanaged_evaluation_outputs,
 )
 from .temp_storage import temporary_directory
-from .files import parse_paper_dir
 from .task_failure import (
     AGENT_LOG_FAILURE, INFRASTRUCTURE_EXIT_CODE, TASK_CONTRACT_FAILURE, TASK_FAILURE_FD_ENV,
     failure_details, read_task_failure,
 )
-from .models import (
-    IdeaGenerationResult,
-    PaperGenerationResult,
-    RunAttemptResult,
-    TaskDraftResult,
-)
-from src.orchestrator.paper_event_bridge import extract_transport_events
-from src.task_drafting.progress import (
-    TASK_PROGRESS_COST_FIELDS,
-    extract_transport_events as extract_task_progress_events,
-)
+from .models import IdeaGenerationResult, RunAttemptResult
+from .runtime import script_environment
 
 PopenFactory = Callable[..., subprocess.Popen[str]]
 RegisterFn = Callable[[subprocess.Popen[str]], None]
 UnregisterFn = Callable[[subprocess.Popen[str]], None]
 TerminateFn = Callable[..., None]
-ContainerEnvFn = Callable[..., dict[str, str]]
 EnsureTextFn = Callable[[Optional[Union[str, bytes]]], str]
 OutputLineFn = Callable[[str], bool]
 
@@ -496,21 +477,12 @@ def run_idea_generation(
     instruct_path: Path,
     timeout_seconds: int,
     timeout_grace_seconds: int = DEFAULT_RUN_TIMEOUT_GRACE_SECONDS,
-    harness_evaluated_attempts: bool = False,
-    containerize: bool = False,
-    container_image: str = DEFAULT_CONTAINER_IMAGE,
-    container_network: str = DEFAULT_CONTAINER_NETWORK,
-    container_auth_root: Path | None = None,
-    container_env_file: Path | None = None,
-    container_session_name: str | None = None,
-    container_mount_root: Path | None = None,
     validation_feedback: str = "",
     script_path: Path,
     popen_factory: PopenFactory,
     register_subprocess: RegisterFn,
     unregister_subprocess: UnregisterFn,
     terminate_process_group: TerminateFn,
-    container_execution_env: ContainerEnvFn,
     ensure_text: EnsureTextFn,
 ) -> IdeaGenerationResult:
     """Run idea generation."""
@@ -542,8 +514,6 @@ def run_idea_generation(
         "--instruct",
         str(instruct_path),
     ]
-    if harness_evaluated_attempts:
-        cmd.append("--harness-evaluated-attempt")
     if validation_feedback:
         cmd.extend(["--validation-feedback", sanitize_validation_feedback(validation_feedback)])
     if model:
@@ -552,20 +522,8 @@ def run_idea_generation(
         cmd.extend(["--agent-profile", profile])
     if reasoning_effort:
         cmd.extend(["--reasoning-effort", reasoning_effort])
-    if containerize:
-        cmd.append("--containerize")
-        cmd.extend(["--container-image", container_image])
-        cmd.extend(["--container-network", container_network])
-        auth_root = container_auth_root if container_auth_root is not None else Path.home()
-        cmd.extend(["--container-auth-root", str(auth_root)])
-        if container_env_file is not None:
-            cmd.extend(["--container-env-file", str(container_env_file)])
 
-    env = container_execution_env(
-        containerize=containerize,
-        container_session_name=container_session_name,
-        container_mount_root=container_mount_root,
-    )
+    env = script_environment()
     identity = f"idea_generation_cycle_{cycle_index}_worker_{worker_index}"
     with tempfile.TemporaryFile(mode="w+b", dir=temporary_directory()) as control:
         env[TASK_FAILURE_FD_ENV] = str(control.fileno())
@@ -628,27 +586,14 @@ def run_single_attempt(
     timeout_seconds: int,
     timeout_grace_seconds: int = DEFAULT_RUN_TIMEOUT_GRACE_SECONDS,
     max_program_evals_per_attempt: int = DEFAULT_MAX_PROGRAM_EVALS_PER_ATTEMPT,
-    harness_evaluated_attempts: bool = False,
-    harness_evaluation_timeout_seconds: int = DEFAULT_HARNESS_EVALUATION_TIMEOUT_SECONDS,
-    gpu_evaluation: bool = False,
-    containerize: bool = False,
-    container_image: str = DEFAULT_CONTAINER_IMAGE,
-    container_network: str = DEFAULT_CONTAINER_NETWORK,
-    container_auth_root: Path | None = None,
-    container_env_file: Path | None = None,
-    container_session_name: str | None = None,
-    container_mount_root: Path | None = None,
     script_path: Path,
     popen_factory: PopenFactory,
     register_subprocess: RegisterFn,
     unregister_subprocess: UnregisterFn,
     terminate_process_group: TerminateFn,
-    container_execution_env: ContainerEnvFn,
     ensure_text: EnsureTextFn,
 ) -> RunAttemptResult:
     """Run single attempt."""
-    if type(harness_evaluation_timeout_seconds) is not int or harness_evaluation_timeout_seconds < 1:
-        raise ValueError("harness_evaluation_timeout_seconds must be a positive integer")
     memory_dir = global_memory_dir if global_memory_dir is not None else results_dir
     conclusions_dir_resolved = conclusions_dir if conclusions_dir is not None else memory_dir
     model = agent_model.strip() if isinstance(agent_model, str) else ""
@@ -681,11 +626,6 @@ def run_single_attempt(
         "--max-program-evals-per-attempt",
         str(max_program_evals_per_attempt),
     ]
-    if harness_evaluated_attempts:
-        cmd.extend(["--harness-evaluated-attempt", "--agent-timeout-seconds", str(timeout_seconds)])
-        cmd.extend(["--harness-evaluation-timeout-seconds", str(harness_evaluation_timeout_seconds)])
-    if gpu_evaluation:
-        cmd.append("--gpu-evaluation")
     if isinstance(attempt_dir_name, str) and attempt_dir_name.strip():
         cmd.extend(["--attempt-dir-name", attempt_dir_name.strip()])
     if model:
@@ -696,20 +636,8 @@ def run_single_attempt(
         cmd.extend(["--reasoning-effort", reasoning_effort])
     if instruct_path is not None:
         cmd.extend(["--instruct", str(instruct_path)])
-    if containerize:
-        cmd.append("--containerize")
-        cmd.extend(["--container-image", container_image])
-        cmd.extend(["--container-network", container_network])
-        auth_root = container_auth_root if container_auth_root is not None else Path.home()
-        cmd.extend(["--container-auth-root", str(auth_root)])
-        if container_env_file is not None:
-            cmd.extend(["--container-env-file", str(container_env_file)])
 
-    env = container_execution_env(
-        containerize=containerize,
-        container_session_name=container_session_name,
-        container_mount_root=container_mount_root,
-    )
+    env = script_environment()
     directory_guard = ExperimentDirectoryGuard.prepare(results_dir, idea_dir_name)
     experiment_fd: int | None = None
     control = None
@@ -728,11 +656,7 @@ def run_single_attempt(
         env[TASK_FAILURE_FD_ENV] = str(control.fileno())
         output, exit_code = _execute_script_command(
             cmd=cmd,
-            timeout_seconds=(
-                timeout_seconds + harness_evaluation_timeout_seconds
-                if harness_evaluated_attempts
-                else timeout_seconds
-            ),
+            timeout_seconds=timeout_seconds,
             timeout_grace_seconds=timeout_grace_seconds,
             script_label="src/scripts/run.sh",
             missing_output="[wrapper] src/scripts/run.sh not found\n",
@@ -797,356 +721,6 @@ def run_single_attempt(
         exit_code=exit_code,
         experiment_dir=experiment_dir,
         task_failure_category=task_failure_category,
-    )
-
-
-def run_paper_generation(
-    *,
-    agent: str,
-    agent_model: str | None = None,
-    agent_profile: str | None = None,
-    reasoning_effort: str | None = None,
-    task_dir: Path,
-    results_dir: Path,
-    global_memory_dir: Path | None,
-    output_dir: Path,
-    instruct_path: Path,
-    timeout_seconds: int,
-    contributions_path: Path | None = None,
-    timeout_grace_seconds: int = DEFAULT_PAPER_TIMEOUT_GRACE_SECONDS,
-    paper_min_refs: int = DEFAULT_PAPER_MIN_REFS,
-    paper_max_refs: int = DEFAULT_PAPER_MAX_REFS,
-    paper_profile: str = "default",
-    paper_skills: Sequence[str] | None = None,
-    two_stage: bool = False,
-    paper_review_rounds: int = 0,
-    paper_max_repair_rounds: int = DEFAULT_PAPER_MAX_REPAIR_ROUNDS,
-    containerize: bool = False,
-    container_image: str = DEFAULT_CONTAINER_IMAGE,
-    container_network: str = DEFAULT_CONTAINER_NETWORK,
-    container_auth_root: Path | None = None,
-    container_env_file: Path | None = None,
-    container_session_name: str | None = None,
-    container_mount_root: Path | None = None,
-    script_path: Path,
-    popen_factory: PopenFactory,
-    register_subprocess: RegisterFn,
-    unregister_subprocess: UnregisterFn,
-    terminate_process_group: TerminateFn,
-    container_execution_env: ContainerEnvFn,
-    ensure_text: EnsureTextFn,
-    paper_event_fn: Callable[..., None] | None = None,
-) -> PaperGenerationResult:
-    """Run paper generation."""
-    memory_dir = global_memory_dir if global_memory_dir is not None else results_dir
-    model = agent_model.strip() if isinstance(agent_model, str) else ""
-    profile = agent_profile.strip() if isinstance(agent_profile, str) else ""
-    cmd = [
-        "bash",
-        str(script_path),
-        "--agent",
-        agent,
-        "--task-dir",
-        str(task_dir),
-        "--results-dir",
-        str(results_dir),
-        "--global-memory-dir",
-        str(memory_dir),
-        "--output-dir",
-        str(output_dir),
-        "--instruct",
-        str(instruct_path),
-        "--paper-min-refs",
-        str(paper_min_refs),
-        "--paper-max-refs",
-        str(paper_max_refs),
-        "--paper-profile",
-        paper_profile,
-        "--paper-review-rounds",
-        str(paper_review_rounds),
-        "--paper-max-repair-rounds",
-        str(paper_max_repair_rounds),
-        "--event-transport",
-        "wrapper",
-        "--heartbeat-seconds",
-        "0",
-    ]
-    if model:
-        cmd.extend(["--agent-model", model])
-    if profile:
-        cmd.extend(["--agent-profile", profile])
-    if reasoning_effort:
-        cmd.extend(["--reasoning-effort", reasoning_effort])
-    if contributions_path is not None:
-        cmd.extend(["--contributions-file", str(contributions_path)])
-    if paper_skills:
-        selected_skills = [skill.strip() for skill in paper_skills if skill.strip()]
-        if selected_skills:
-            cmd.extend(["--skills", ",".join(selected_skills)])
-    if two_stage:
-        cmd.append("--two-stage")
-    if containerize:
-        cmd.append("--containerize")
-        cmd.extend(["--container-image", container_image])
-        cmd.extend(["--container-network", container_network])
-        auth_root = container_auth_root if container_auth_root is not None else Path.home()
-        cmd.extend(["--container-auth-root", str(auth_root)])
-        if container_env_file is not None:
-            cmd.extend(["--container-env-file", str(container_env_file)])
-
-    env = container_execution_env(
-        containerize=containerize,
-        container_session_name=container_session_name,
-        container_mount_root=container_mount_root,
-    )
-    env["PAPER_WORKFLOW_TIMEOUT_SECONDS"] = str(timeout_seconds)
-
-    def consume_paper_event_line(line: str) -> bool:
-        retained, records = extract_transport_events(line)
-        if retained:
-            return False
-        if paper_event_fn is not None:
-            for record in records:
-                paper_event_fn(
-                    "paper_gate",
-                    gate=record["gate"],
-                    state=record["state"],
-                    paper_session_id=record["session_id"],
-                    paper_timestamp=record["timestamp"],
-                    paper_fields=record["fields"],
-                )
-        return True
-
-    output, exit_code = _execute_script_command(
-        cmd=cmd,
-        timeout_seconds=timeout_seconds,
-        timeout_grace_seconds=timeout_grace_seconds,
-        script_label="src/scripts/paper.sh",
-        missing_output="[wrapper] src/scripts/paper.sh not found\n",
-        popen_factory=popen_factory,
-        register_subprocess=register_subprocess,
-        unregister_subprocess=unregister_subprocess,
-        terminate_process_group=terminate_process_group,
-        ensure_text=ensure_text,
-        env=env,
-        output_line_fn=consume_paper_event_line,
-    )
-    paper_dir = parse_paper_dir(output)
-    return PaperGenerationResult(
-        output=output,
-        exit_code=exit_code,
-        paper_dir=paper_dir,
-    )
-
-
-def run_task_drafting(
-    *,
-    agent: str,
-    agent_model: str | None = None,
-    agent_profile: str | None = None,
-    reasoning_effort: str | None = None,
-    task_dir: Path,
-    output_dir: Path,
-    instruct_path: Path,
-    timeout_seconds: int,
-    timeout_grace_seconds: int = DEFAULT_RUN_TIMEOUT_GRACE_SECONDS,
-    workflow: str = "robust",
-    design_max_repairs: int = 8,
-    contract_max_repairs: int = 3,
-    smoke_max_repairs: int = 3,
-    smoke_max_infrastructure_attempts: int = 3,
-    alignment_max_repairs: int = 10,
-    qualification_max_repairs: int = 4,
-    agent_transient_max_attempts: int = 4,
-    qualification_max_infrastructure_attempts: int = 3,
-    production_entry_timeout_seconds: int = 300,
-    max_gate_checks_per_repair: int = 12,
-    draft_max_attempts: int = 3,
-    evaluator_smoke_timeout_seconds: int = 1800,
-    max_runtime_bytes: int = 16 * 1024 * 1024 * 1024,
-    max_idea_cycles: int = 20,
-    max_program_evals_per_attempt: int = DEFAULT_MAX_PROGRAM_EVALS_PER_ATTEMPT,
-    containerize: bool = False,
-    container_image: str = DEFAULT_CONTAINER_IMAGE,
-    container_network: str = DEFAULT_CONTAINER_NETWORK,
-    container_auth_root: Path | None = None,
-    container_env_file: Path | None = None,
-    container_session_name: str | None = None,
-    container_mount_root: Path | None = None,
-    script_path: Path,
-    popen_factory: PopenFactory,
-    register_subprocess: RegisterFn,
-    unregister_subprocess: UnregisterFn,
-    terminate_process_group: TerminateFn,
-    container_execution_env: ContainerEnvFn,
-    ensure_text: EnsureTextFn,
-    task_event_fn: Callable[..., None] | None = None,
-) -> TaskDraftResult:
-    """Run task drafting."""
-    model = agent_model.strip() if isinstance(agent_model, str) else ""
-    profile = agent_profile.strip() if isinstance(agent_profile, str) else ""
-    cmd = [
-        "bash",
-        str(script_path),
-        "--agent",
-        agent,
-        "--task-dir",
-        str(task_dir),
-        "--output-dir",
-        str(output_dir),
-        "--instruct",
-        str(instruct_path),
-    ]
-    if model:
-        cmd.extend(["--agent-model", model])
-    if profile:
-        cmd.extend(["--agent-profile", profile])
-    if reasoning_effort:
-        cmd.extend(["--reasoning-effort", reasoning_effort])
-    cmd.extend(
-        [
-            "--workflow",
-            workflow,
-            "--design-max-repairs",
-            str(design_max_repairs),
-            "--contract-max-repairs",
-            str(contract_max_repairs),
-            "--smoke-max-repairs",
-            str(smoke_max_repairs),
-            "--smoke-max-infrastructure-attempts",
-            str(smoke_max_infrastructure_attempts),
-            "--alignment-max-repairs",
-            str(alignment_max_repairs),
-            "--qualification-max-repairs",
-            str(qualification_max_repairs),
-            "--agent-transient-max-attempts",
-            str(agent_transient_max_attempts),
-            "--qualification-max-infrastructure-attempts",
-            str(qualification_max_infrastructure_attempts),
-            "--production-entry-timeout-seconds",
-            str(production_entry_timeout_seconds),
-            "--qualification-timeout-seconds",
-            str(timeout_seconds),
-            "--max-gate-checks-per-repair",
-            str(max_gate_checks_per_repair),
-            "--max-runtime-bytes",
-            str(max_runtime_bytes),
-            "--draft-max-attempts",
-            str(draft_max_attempts),
-            "--evaluator-smoke-timeout-seconds",
-            str(evaluator_smoke_timeout_seconds),
-            "--max-idea-cycles",
-            str(max_idea_cycles),
-            "--max-program-evals-per-attempt",
-            str(max_program_evals_per_attempt),
-        ]
-    )
-    if containerize:
-        cmd.append("--containerize")
-        cmd.extend(["--container-image", container_image])
-        cmd.extend(["--container-network", container_network])
-        auth_root = container_auth_root if container_auth_root is not None else Path.home()
-        cmd.extend(["--container-auth-root", str(auth_root)])
-        if container_env_file is not None:
-            cmd.extend(["--container-env-file", str(container_env_file)])
-
-    env = container_execution_env(
-        containerize=containerize,
-        container_session_name=container_session_name,
-        container_mount_root=container_mount_root,
-    )
-    progress_session_id = uuid.uuid4().hex
-    progress_auth_token = secrets.token_hex(32)
-    env["AGENTIC_TASK_PROGRESS_TRANSPORT"] = "wrapper"
-    env["TASK_PROGRESS_SESSION_ID"] = progress_session_id
-    env["TASK_PROGRESS_AUTH_TOKEN"] = progress_auth_token
-    active_checkpoints: list[dict[str, Any]] = []
-
-    def consume_task_event_line(line: str) -> bool:
-        retained, records = extract_task_progress_events(
-            line,
-            expected_session_id=progress_session_id,
-            auth_token=progress_auth_token,
-        )
-        if retained:
-            return False
-        for record in records:
-            event_fields = {
-                key: value
-                for key, value in record["fields"].items()
-                if key not in TASK_PROGRESS_COST_FIELDS
-            }
-            event_fields.update(
-                {
-                    "gate": record["gate"],
-                    "state": record["state"],
-                    "task_drafting_session_id": record["session_id"],
-                    "task_drafting_timestamp": record["timestamp"],
-                }
-            )
-            state = record["state"]
-            if state == "started":
-                if (
-                    active_checkpoints
-                    and active_checkpoints[-1].get("gate") == record["gate"]
-                    and active_checkpoints[-1].get("state") == "retrying"
-                ):
-                    active_checkpoints.pop()
-                active_checkpoints.append(dict(event_fields))
-            elif (
-                state == "retrying"
-                and active_checkpoints
-                and active_checkpoints[-1].get("gate") == record["gate"]
-            ):
-                active_checkpoints[-1].update(event_fields)
-            elif state in {"completed", "failed", "skipped"}:
-                for index in range(len(active_checkpoints) - 1, -1, -1):
-                    if active_checkpoints[index].get("gate") == record["gate"]:
-                        del active_checkpoints[index]
-                        break
-            if task_event_fn is not None:
-                task_event_fn("task_drafting_checkpoint", **event_fields)
-        return True
-
-    with tempfile.TemporaryFile(mode="w+b", dir=temporary_directory()) as control:
-        env[TASK_FAILURE_FD_ENV] = str(control.fileno())
-        try:
-            output, exit_code = _execute_script_command(
-                cmd=cmd,
-                timeout_seconds=timeout_seconds,
-                timeout_grace_seconds=timeout_grace_seconds,
-                script_label="src/scripts/task.sh",
-                missing_output="[wrapper] src/scripts/task.sh not found\n",
-                popen_factory=popen_factory,
-                register_subprocess=register_subprocess,
-                unregister_subprocess=unregister_subprocess,
-                terminate_process_group=terminate_process_group,
-                ensure_text=ensure_text,
-                env=env,
-                output_line_fn=consume_task_event_line,
-                pass_fds=(control.fileno(),),
-            )
-        except Exception:
-            if read_task_failure(control.fileno(), "task_drafting", "task_drafting") != AGENT_LOG_FAILURE:
-                raise
-            output = "[wrapper] task logger infrastructure failure; secondary host error\n"
-            exit_code = INFRASTRUCTURE_EXIT_CODE
-        failure = read_task_failure(control.fileno(), "task_drafting", "task_drafting")
-    if active_checkpoints and task_event_fn is not None:
-        for active_checkpoint in reversed(active_checkpoints):
-            terminal_fields = dict(active_checkpoint)
-            terminal_fields["state"] = "failed" if exit_code else "completed"
-            terminal_fields["cost_checkpoint"] = True
-            terminal_fields["synthetic"] = True
-            try:
-                task_event_fn("task_drafting_checkpoint", **terminal_fields)
-            except Exception:
-                pass
-    return TaskDraftResult(
-        output=output,
-        exit_code=exit_code,
-        draft_dir=output_dir,
-        infrastructure_failure_category=AGENT_LOG_FAILURE if failure == AGENT_LOG_FAILURE else None,
     )
 
 

@@ -570,9 +570,7 @@ class Lab:
             o["acceptance"], Limits(int(minutes * 60)), inputs=tuple(o["inputs"]),
             require_sources=False,
             params={"task_dir": str(task), "results_root": str(ws / ENGINE_RUNS),
-                    "phases": ["investigation"],
-                    "overrides": {"investigation.execution.max_idea_cycles": cycles,
-                                  "versioning.enabled": False}}))
+                    "cycles": cycles}))
 
     def _final_evals(self) -> list[str]:
         """Final-evaluation orders that ran, run, or will run."""

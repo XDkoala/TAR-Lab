@@ -192,20 +192,21 @@
 
 ## 引擎边界：AI-Scientist-v3
 
-AI-Scientist-v3 负责“给定任务 → 实验证据和论文”这一段：先构思，再迭代改进程序，接着做消融和事后分析，最后写论文。它擅长有明确评分函数的计算实验。它不负责选题、调研和跨项目规划。
+TAR-Lab 只用 AI-Scientist-v3 的“想法搜索”循环（investigation）：给定一个有自动打分的任务，编码 Agent 反复提出想法、改程序、调用任务的打分脚本，保留得分最高的程序。选题、调研、消融、最终评估、写论文和评审都由 TAR-Lab 自己的角色完成，所以 `engines/ai-scientist-v3/` 已精简为只含这一循环，并在本机原生运行（不用 Docker）。删除内容见 `patches/ai-scientist-v3/README.md`。
 
 平台与引擎的契约：
 
-- **输入**：任务目录，包含 `task.md`、`evaluate.py`、`program_0/` 等（格式见 `engines/ai-scientist-v3/examples/circpack`），以及 Hydra 配置覆盖项。
-- **调用**：使用引擎环境中的 `agsci run`，作为独立进程运行（`deploy/local/agsci-local.sh` 是现成示例）。
-- **输出**：运行目录（`<runs>/<task>/<agent>/<run_id>/`）中的 `best_program_manifest.json`、消融与事后分析结果、论文目录和日志。
-- **约束**：平台不导入 `src.*`。引擎有独立的环境和测试，可以深度修改，甚至整个替换，而不影响平台。
+- **输入**：任务目录，包含 `task.md`、`evaluate.py`、`capture.py`、`program_0/`（格式见 `engines/ai-scientist-v3/examples/circpack`），可选的任务环境 `.venv`（候选程序用它评估）。
+- **调用**：`<引擎>/.venv/bin/python -m src.investigation.cli`，作为独立进程运行，传入 `paths.task_dir`、`paths.results_dir`、`run_id`、Agent 和想法轮数。Agent 通过本地的 headless CLI（`HEADLESS_BIN`）启动，使用订阅登录。
+- **输出**：运行目录（`<results_root>/<task>/<run_id>/`）中的 `events.jsonl`（`finished`/`campaign_failed`、`cost_summary`）、`best_program_manifest.json`、`attempts_history.jsonl`、`conclusions.md` 和 `ideas/`。
+- **约束**：平台不导入 `src.*`。引擎有独立的环境和测试。
 
-适配器 `tar_lab.integrations.ai_scientist` 的接口：
+适配器 `tar_lab.integrations.ai_scientist`：
 
-- `TaskSpec` + `write_task_dir()`：生成任务目录。没有 `program_0/` 的任务必须包含 `task_drafting` 阶段。
-- `AIScientistEngine.run(RunRequest)`：以子进程运行 `agsci run`。会显式传入 `run_id` 和 `paths.results_root`，所以运行目录可以预先确定；同时清除宿主机的 `PYTHONPATH`；控制台输出写入日志文件。
-- `load_run(run_dir)` / `tarlab engine summary <run_dir>`：从 `pipeline_events.jsonl`、`investigation/best_program_manifest.json`、`.investigation_completion.json`、`paper/paper.pdf` 中汇总各阶段状态、最佳程序、结局和费用。续跑时，以每个阶段最后一次的结果为准。
+- `task_problems(task_dir)`：检查任务目录是否完整，平台据此放行或拒绝引擎工单。
+- `AIScientistEngine` + `RunRequest`：拼出命令和环境（清除宿主机 `PYTHONPATH`，把 `codex` 链接进 `PATH`，设置 `HEADLESS_BIN` 和订阅计费）。`pipeline=True` 用于未改动的上游原版，运行它自己的 `agsci run`，只跑 investigation 阶段，关闭容器。
+- `AIScientistExecutor`：内核执行者，结果里写明是否超过基线、最佳分数、最佳程序位置和引擎的最新结论。
+- `load_run(run_dir)` / `tarlab engine summary <run_dir>`：汇总状态、最佳程序、结局、费用和耗时；兼容原版的嵌套布局（`investigation/`）。
 
 ## Undermind 集成
 
@@ -213,7 +214,6 @@ AI-Scientist-v3 负责“给定任务 → 实验证据和论文”这一段：�
 - **授权限制**：没有 API 密钥或服务账户，必须以某个用户的身份授权。无人值守运行时，平台需要安全保存并刷新令牌。客户端 ID 需要 Undermind 预先注册，或者使用自己托管的 CIMD。
 - **工具权限**：部分工具会删除数据或无法撤销，自动运行时默认只开放读取和创建类工具。
 - **平台层用途**：选题、调研、新颖性检查、寻找基线方法和数据集，结果写入 `memory`。
-- **引擎层用途（可选）**：为容器内的 Codex/Claude CLI 配置 MCP，在构思和写论文阶段使用 Undermind。代价是要把登录凭据挂载进容器。
 
 实现（`tar_lab.integrations.undermind`）：
 

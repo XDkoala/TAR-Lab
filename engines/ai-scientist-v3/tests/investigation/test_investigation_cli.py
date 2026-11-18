@@ -8,8 +8,6 @@ import json
 import os
 import re
 import sys
-import threading
-import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -17,24 +15,35 @@ from unittest.mock import Mock, patch
 import pytest
 
 from tests.program_testutils import make_program_dir
-from tests.task_drafting.test_task_contract import _valid_contract
 
 from src.investigation import cli as investigation_cli
 from src.investigation import runtime as runtime_module
-from src.investigation.config import (
-    AgentConfig,
-    ContainerConfig,
-    ExecutionConfig,
-    InvestigationConfig,
-    PaperConfig,
-    PathsConfig,
-)
-from src.investigation.config_loader import _dict_to_config
-from src.investigation.main_entry import _enable_contracted_harness_mode
-from src.investigation.task_runtime import (
-    TaskRuntimePreparationReport,
-    TaskRuntimePreparationResult,
-)
+from src.investigation import script_runners
+from src.investigation.files import load_instructions
+from src.investigation.config import AgentConfig, ExecutionConfig, InvestigationConfig, PathsConfig
+
+
+def _main_setup(
+    root: Path, *, scaffold: bool = True, max_idea_cycles: int = 1, instruct_name: str = "instruct.md"
+) -> tuple[Path, Path, InvestigationConfig]:
+    task_dir = _make_task_dir(root, scaffold=scaffold)
+    results_dir = root / "results"
+    instruct = root / instruct_name
+    instruct.write_text("template", encoding="utf-8")
+    cfg = InvestigationConfig(
+        agent=AgentConfig(name="codex"),
+        paths=PathsConfig(task_dir=str(task_dir), results_dir=str(results_dir), instruct=str(instruct)),
+        execution=ExecutionConfig(
+            max_idea_cycles=max_idea_cycles,
+            run_timeout_seconds=5,
+            run_timeout_grace_seconds=1,
+            max_program_evals_per_attempt=4,
+            resume=False,
+        ),
+    )
+    return task_dir, results_dir, cfg
+
+
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 CLI = "src.investigation.cli"
 HEADLESS_PREFIX = [
@@ -76,26 +85,8 @@ def _fake_proc(output: str, returncode: int = 0) -> Mock:
     return proc
 
 
-def _worker_plan(root: Path, *command_tail: str) -> investigation_cli.ParallelWorkerPlan:
-    return investigation_cli.ParallelWorkerPlan(
-        worker_index=1,
-        assigned_cycles=1,
-        cycle_start=1,
-        cycle_end=1,
-        results_dir=root / "worker_01",
-        command=[*WORKER_MODULE, *command_tail],
-    )
 
 
-def _worker_result(plan: investigation_cli.ParallelWorkerPlan, **extra: Any) -> investigation_cli.ParallelWorkerResult:
-    return investigation_cli.ParallelWorkerResult(
-        plan=plan,
-        exit_code=0,
-        log_path=plan.log_path or plan.results_dir / "worker.log",
-        elapsed_seconds=0.0,
-        output_tail="",
-        **extra,
-    )
 
 
 def _campaign_setup(root: Path, **execution: Any) -> tuple[Path, Path, InvestigationConfig]:
@@ -106,15 +97,6 @@ def _campaign_setup(root: Path, **execution: Any) -> tuple[Path, Path, Investiga
     return task_dir, root / "results", cfg
 
 
-def _run_campaign(cfg: InvestigationConfig, root: Path, task_dir: Path, results_dir: Path) -> int:
-    return investigation_cli.run_parallel_campaign(
-        cfg=cfg,
-        task_dir=task_dir,
-        results_dir=results_dir,
-        global_memory_dir=results_dir,
-        instruct_path=root / "instruct.md",
-        seed_program_dir=task_dir / "program_0",
-    )
 
 
 def _attempt_kwargs(root: Path, **overrides: Any) -> dict[str, Any]:
@@ -142,42 +124,6 @@ def _attempt_kwargs(root: Path, **overrides: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_load_config_defaults_seed_program_field_and_removed_preset_group() -> None:
-    # load_config defaults include the extended timeout budget
-    cfg = investigation_cli.load_config([])
-
-    expected = {
-        "execution.run_timeout_seconds": 21600,
-        "execution.idea_timeout_seconds": 3600,
-        "execution.max_idea_generation_attempts": 2,
-        "execution.run_timeout_grace_seconds": 30,
-        "paper.timeout_seconds": 7200,
-        "paper.timeout_grace_seconds": 30,
-        "paper.min_refs": 8,
-        "paper.max_refs": 15,
-        "execution.workers": 1,
-        "paper.enabled": False,
-        "paper.profile": "default",
-        "paper.two_stage": False,
-        "paper.ai_review": "disabled",
-        "execution.draft_task_if_missing": False,
-        "execution.task_only": False,
-        "container.enabled": False,
-        "container.image": investigation_cli.DEFAULT_CONTAINER_IMAGE,
-        "container.network": investigation_cli.DEFAULT_CONTAINER_NETWORK,
-        "container.env_file": "",
-    }
-    assert {key: _attr(cfg, key) for key in expected} == expected
-
-    # _dict_to_config keeps the seed_program field
-    cfg = _dict_to_config({"paths": {"task_dir": "examples/circpack", "seed_program": "/tmp/seed.py"}})
-    assert cfg.paths.seed_program == "/tmp/seed.py"
-
-    # load_config rejects the removed preset group
-    from hydra.errors import ConfigCompositionException
-
-    with pytest.raises(ConfigCompositionException):
-        investigation_cli.load_config(["preset=docker"])
 
 
 LOAD_CONFIG_OVERRIDE_CASES: list[tuple[str, list[str], dict[str, Any]]] = [
@@ -186,10 +132,9 @@ LOAD_CONFIG_OVERRIDE_CASES: list[tuple[str, list[str], dict[str, Any]]] = [
         ["agent.name=codex", "agent.name=gemini", "execution.max_idea_cycles=7"],
         {"agent.name": "gemini", "execution.max_idea_cycles": 7},
     ),
-    ("task_draft", ["execution.draft_task_if_missing=true"], {"execution.draft_task_if_missing": True}),
-    ("task_only", ["execution.task_only=true"], {"execution.task_only": True}),
     ("agent_model", ["agent.model=gpt-5.2"], {"agent.model": "gpt-5.2"}),
     ("reasoning_effort", ["agent.reasoning_effort=xhigh"], {"agent.reasoning_effort": "xhigh"}),
+    ("task_python", ["paths.task_python=/opt/task/bin/python"], {"paths.task_python": "/opt/task/bin/python"}),
     (
         "codex_profile",
         ["agent.name=codex", "agent.profile=custom", "agent.model=custom-model"],
@@ -209,32 +154,6 @@ LOAD_CONFIG_OVERRIDE_CASES: list[tuple[str, list[str], dict[str, Any]]] = [
         "idea_generation_recovery",
         ["execution.idea_timeout_seconds=42", "execution.max_idea_generation_attempts=3"],
         {"execution.idea_timeout_seconds": 42, "execution.max_idea_generation_attempts": 3},
-    ),
-    (
-        "parallel_write_paper",
-        ["execution.workers=2", "paper.enabled=true"],
-        {"execution.workers": 2, "paper.enabled": True},
-    ),
-    ("openai_final_review", ["paper.ai_review=openai"], {"paper.ai_review": "openai"}),
-    (
-        "all_valid_keys",
-        ["agent.name=claude", "execution.max_idea_cycles=5", "paper.min_refs=2", "paper.max_refs=10", "container.image=test:latest"],
-        {"agent.name": "claude", "execution.max_idea_cycles": 5},
-    ),
-    (
-        "two_stage_paper",
-        ["paper.enabled=true", "paper.two_stage=true"],
-        {"paper.enabled": True, "paper.two_stage": True},
-    ),
-    (
-        "standalone_paper_flag",
-        ["--standalone-paper"],
-        {
-            "paper.enabled": True,
-            "paper.two_stage": True,
-            "paper.profile": "standalone",
-            "paths.paper_instruct": "src/prompts/paper_standalone.md",
-        },
     ),
 ]
 
@@ -258,9 +177,7 @@ LOAD_CONFIG_REJECTED_CASES: list[tuple[str, list[str]]] = [
     ("non_positive_timeout_grace", ["execution.run_timeout_grace_seconds=0"]),
     ("non_positive_idea_timeout", ["execution.idea_timeout_seconds=0"]),
     ("non_positive_idea_attempts", ["execution.max_idea_generation_attempts=0"]),
-    ("non_positive_workers", ["execution.workers=0"]),
-    ("unknown_final_review", ["paper.ai_review=unknown"]),
-    ("paper_ref_bounds", ["paper.min_refs=10", "paper.max_refs=9"]),
+    ("removed_container_group", ["+container.enabled=true"]),
     ("unknown_top_level_key", ["+bogus_key=1"]),
     ("typo_in_execution_group", ["+execution.max_idea_cyles=5"]),
     ("typo_in_agent_group", ["+agent.nme=claude"]),
@@ -294,42 +211,6 @@ NORMALIZE_RESULTS_DIR_CASES: list[tuple[str, str, str]] = [
 ]
 
 
-def test_results_path_helpers_and_normalize_agent_results_dir(tmp_path: Path) -> None:
-    # default_results_path uses task dir name and agent
-    task_dir = tmp_path / "examples" / "kissing"
-    task_dir.mkdir(parents=True)
-    actual = investigation_cli.default_results_path(task_dir, "codex")
-    assert actual == investigation_cli.resolve_path(Path("results") / "kissing" / "codex")
-
-    # relative_display_path uses dot prefix inside and parent segments outside
-    base = tmp_path / "base"
-    assert investigation_cli.relative_display_path(base / "nested" / "file.txt", base_dir=base) == "./nested/file.txt"
-    assert investigation_cli.relative_display_path(tmp_path / "other" / "file.txt", base_dir=base) == "../other/file.txt"
-
-    # state path helpers build the idea/attempt hierarchy
-    results_dir = Path("/tmp/results")
-    store = investigation_cli.state_store
-    assert store.idea_dir(results_dir, "01_fast_restarts") == results_dir / "ideas" / "01_fast_restarts"
-    assert (
-        store.attempt_dir(results_dir, "01_fast_restarts", "01_attempt")
-        == results_dir / "ideas" / "01_fast_restarts" / "01_attempt"
-    )
-
-    # normalize_agent_results_dir appends the agent exactly once
-    for name, given, expected in NORMALIZE_RESULTS_DIR_CASES:
-        assert investigation_cli.normalize_agent_results_dir(Path(given), "claude") == Path(expected), name
-
-    # resolve_defaults then normalize does not double-append
-    from src.investigation.config import resolve_defaults
-
-    cfg = InvestigationConfig(
-        agent=AgentConfig(name="claude"), paths=PathsConfig(task_dir="examples/circpack", results_dir=None)
-    )
-    resolve_defaults(cfg)
-
-    assert cfg.paths.results_dir is not None
-    parallel_dir = investigation_cli.normalize_agent_results_dir(Path(cfg.paths.results_dir), cfg.agent.name)
-    assert parallel_dir.parts.count("claude") == 1, f"Expected 'claude' exactly once in {parallel_dir}"
 
 
 def test_ensure_task_copy_in_results_and_directory_alias(tmp_path: Path) -> None:
@@ -398,97 +279,11 @@ def test_ensure_task_copy_in_results_and_directory_alias(tmp_path: Path) -> None
     assert not same.is_symlink()
 
 
-def test_build_parallel_worker_command_forwards_flags_leased_cycles_and_agent_pool(tmp_path: Path) -> None:
-    # keeps seed program and agent flags
-    cfg = InvestigationConfig(
-        agent=AgentConfig(name="codex", model="gpt-5.2"),
-        paths=PathsConfig(task_dir="examples/circpack"),
-        execution=ExecutionConfig(
-            max_idea_cycles=4, run_timeout_seconds=123, run_timeout_grace_seconds=9, max_program_evals_per_attempt=2
-        ),
-        container=ContainerConfig(
-            enabled=True,
-            image="agentic-scientist/agent-cli:test",
-            network="host",
-            auth_root="~/.auth",
-            env_file="/tmp/agent.env",
-        ),
-    )
-
-    cmd = investigation_cli.build_parallel_worker_command(
-        cfg=cfg,
-        task_dir=Path("/tmp/task"),
-        instruct_path=Path("/tmp/instruct.md"),
-        results_dir=Path("/tmp/results/worker_01"),
-        global_memory_dir=Path("/tmp/results"),
-        assigned_cycles=4,
-        seed_program=Path("/tmp/seed.py"),
-    )
-
-    for expected in (
-        "paths.seed_program=/tmp/seed.py",
-        "agent.model=gpt-5.2",
-        "execution.idea_timeout_seconds=3600",
-        "execution.max_idea_generation_attempts=2",
-    ):
-        assert expected in cmd
-    assert "execution.cycle_offset=0" not in cmd
-    assert "execution.total_cycles=4" not in cmd
-
-    # reports the leased global cycle
-    cfg = InvestigationConfig(
-        paths=PathsConfig(task_dir="examples/circpack"), execution=ExecutionConfig(max_idea_cycles=3, workers=2)
-    )
-
-    # Second lease of worker 2 ran campaign cycle 3: local cycle 2 -> global 3.
-    cmd = investigation_cli.build_parallel_worker_command(
-        cfg=cfg,
-        task_dir=Path("/tmp/task"),
-        instruct_path=Path("/tmp/instruct.md"),
-        results_dir=Path("/tmp/results/worker_02"),
-        global_memory_dir=Path("/tmp/results"),
-        assigned_cycles=2,
-        worker_index=2,
-        resume=True,
-        global_cycle=3,
-    )
-
-    for expected in ("execution.max_idea_cycles=2", "execution.cycle_offset=1", "execution.total_cycles=3"):
-        assert expected in cmd
-
-    # forwards agent pool and models
-    task_dir = tmp_path / "task"
-    task_dir.mkdir()
-    instruct = tmp_path / "instruct.md"
-    instruct.write_text("template", encoding="utf-8")
-    cfg = InvestigationConfig(
-        agent=AgentConfig(
-            name="codex",
-            model="fallback-model",
-            pool=["codex", "claude"],
-            models={"codex": "gpt-5.2", "claude": "claude-opus-4-6"},
-        ),
-        execution=ExecutionConfig(run_timeout_seconds=5, run_timeout_grace_seconds=1),
-    )
-
-    cmd = investigation_cli.build_parallel_worker_command(
-        cfg=cfg,
-        task_dir=task_dir,
-        instruct_path=instruct,
-        results_dir=tmp_path / "results",
-        global_memory_dir=tmp_path / "memory",
-        assigned_cycles=2,
-        worker_index=1,
-    )
-
-    for expected in ("agent.pool=[codex,claude]", "agent.models.codex=gpt-5.2", "agent.models.claude=claude-opus-4-6"):
-        assert expected in cmd
 
 
 OUTPUT_DIR_PARSERS: list[tuple[str, Any, str]] = [
     ("experiment", investigation_cli.parse_experiment_dir, "Experiment"),
     ("idea", investigation_cli.parse_idea_dir, "Idea"),
-    ("paper", investigation_cli.parse_paper_dir, "Paper"),
 ]
 
 
@@ -505,7 +300,7 @@ def test_load_instructions_output_dir_markers_and_best_program_selection(tmp_pat
         encoding="utf-8",
     )
 
-    rendered = investigation_cli.load_instructions(template, task_dir, results_dir, {"ATTEMPT_ID": "attempt_01"})
+    rendered = load_instructions(template, task_dir, results_dir, {"ATTEMPT_ID": "attempt_01"})
 
     for needle in ("GOAL=- optimize", "RUBRICS=- do x", f"TD={task_dir}", f"RD={results_dir}", "A=attempt_01"):
         assert needle in rendered
@@ -548,7 +343,7 @@ INVALID_AGENT_COMMAND_CASES: list[tuple[str, str, dict[str, str], str]] = [
 def test_build_agent_command_routes_through_headless_forwards_model_and_rejects_invalid_combinations() -> None:
     # every agent is routed through headless
     for agent in ("claude", "codex", "cursor", "gemini", "opencode", "pi"):
-        command = investigation_cli._build_agent_command(agent, "/private/prompt.md")
+        command = script_runners.build_agent_command(agent, "/private/prompt.md")
         expected_prefix = [*HEADLESS_PREFIX, agent]
         assert command[: len(expected_prefix)] == expected_prefix, agent
         assert command[command.index("--allow") + 1] == "yolo", agent
@@ -562,11 +357,11 @@ def test_build_agent_command_routes_through_headless_forwards_model_and_rejects_
             ), agent
 
     # claude billing selection is left to headless
-    command = investigation_cli._build_agent_command("claude", "prompt", agent_model="claude-opus-4-8")
+    command = script_runners.build_agent_command("claude", "prompt", agent_model="claude-opus-4-8")
     assert command[:6] == [*HEADLESS_PREFIX, "claude"]
 
     # model and effort are forwarded to headless
-    command = investigation_cli._build_agent_command(
+    command = script_runners.build_agent_command(
         "pi", "/private/prompt.md", agent_model="test-model", reasoning_effort="high"
     )
     assert command == [
@@ -587,7 +382,7 @@ def test_build_agent_command_routes_through_headless_forwards_model_and_rejects_
     # invalid combinations are rejected
     for name, agent, kwargs, message in INVALID_AGENT_COMMAND_CASES:
         with pytest.raises(ValueError, match=message):
-            investigation_cli._build_agent_command(agent, "prompt", **kwargs)
+            script_runners.build_agent_command(agent, "prompt", **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -657,61 +452,6 @@ def test_log_rendering_elapsed_units_field_order_phase_badge_and_separator() -> 
     assert "[wrapper] second" in second_rendered
 
 
-def test_terminate_active_processes_and_stop_container_session_retry_semantics() -> None:
-    # _terminate_all_active_processes targets registered children
-    fake_proc_a, fake_proc_b = Mock(), Mock()
-    with investigation_cli._ACTIVE_SUBPROCESSES_LOCK:
-        investigation_cli._ACTIVE_SUBPROCESSES.clear()
-    try:
-        investigation_cli._register_active_subprocess(fake_proc_a)
-        investigation_cli._register_active_subprocess(fake_proc_b)
-        with patch(f"{CLI}._terminate_process_group") as terminate_mock:
-            investigation_cli._terminate_all_active_processes(grace_seconds=5)
-
-        assert terminate_mock.call_count == 2
-        assert {call.args[0] for call in terminate_mock.call_args_list} == {fake_proc_a, fake_proc_b}
-        assert all(call.kwargs.get("grace_seconds") == 5 for call in terminate_mock.call_args_list)
-    finally:
-        with investigation_cli._ACTIVE_SUBPROCESSES_LOCK:
-            investigation_cli._ACTIVE_SUBPROCESSES.clear()
-
-    # stop_container_session retries then succeeds
-    first = Mock(returncode=1, stderr="daemon busy", stdout="")
-    second = Mock(returncode=0, stderr="", stdout="")
-    log_event_mock = Mock()
-
-    with (
-        patch("src.investigation.runtime.shutil.which", return_value="/usr/bin/docker"),
-        patch("src.investigation.runtime.subprocess.run", side_effect=[first, second]) as run_mock,
-        patch("src.investigation.runtime.time.sleep") as sleep_mock,
-        patch.dict(
-            "src.investigation.runtime.os.environ",
-            {"AGENT_DOCKER_STOP_RETRIES": "2", "AGENT_DOCKER_STOP_RETRY_SLEEP_SECONDS": "0"},
-            clear=False,
-        ),
-    ):
-        stopped = runtime_module.stop_container_session("session-worker-01", log_event_fn=log_event_mock)
-
-    assert stopped
-    assert run_mock.call_count == 2
-    sleep_mock.assert_called_once_with(0.0)
-    log_event_mock.assert_any_call("container_session_stopped", session="session-worker-01", attempts=2)
-
-    # stop_container_session with a missing container returns False without a failure event
-    missing = Mock(returncode=1, stderr="Error: No such container: missing", stdout="")
-    log_event_mock = Mock()
-
-    with (
-        patch("src.investigation.runtime.shutil.which", return_value="/usr/bin/docker"),
-        patch("src.investigation.runtime.subprocess.run", return_value=missing) as run_mock,
-    ):
-        stopped = runtime_module.stop_container_session("missing", log_event_fn=log_event_mock)
-
-    assert not stopped
-    run_mock.assert_called_once()
-    assert not any(
-        call.args and call.args[0] == "container_session_stop_failed" for call in log_event_mock.mock_calls
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -719,107 +459,8 @@ def test_terminate_active_processes_and_stop_container_session_retry_semantics()
 # ---------------------------------------------------------------------------
 
 
-def test_run_parallel_campaign_resets_stale_worker_dir_and_interrupt_stops_container_sessions(tmp_path: Path) -> None:
-    # an existing worker results dir is reset
-    root = tmp_path / "reset"
-    task_dir, results_dir, cfg = _campaign_setup(root, max_idea_cycles=1, workers=1)
-    stale_dir = results_dir / "worker_01" / "ideas" / "01_stale"
-    stale_dir.mkdir(parents=True, exist_ok=True)
-    (stale_dir / "marker.txt").write_text("stale", encoding="utf-8")
-
-    with (
-        patch(f"{CLI}.build_parallel_worker_command", return_value=["echo", "ok"]),
-        patch(f"{CLI}.run_parallel_worker", side_effect=_worker_result),
-        patch(
-            f"{CLI}.aggregate_parallel_worker_outputs",
-            return_value={"failed_worker_count": 0, "idea_count": 0, "attempt_count": 0},
-        ),
-    ):
-        exit_code = _run_campaign(cfg, root, task_dir, results_dir)
-
-    assert exit_code == 0
-    assert not stale_dir.exists()
-
-    # an interrupt stops worker container sessions after terminating processes
-    root = tmp_path / "interrupt"
-    task_dir, results_dir, cfg = _campaign_setup(root, max_idea_cycles=1, workers=1)
-    cfg.agent = AgentConfig(name="codex")
-    cfg.container = ContainerConfig(enabled=True)
-    cleanup_order: list[str] = []
-
-    def _stop_session(*_args: object, **_kwargs: object) -> bool:
-        cleanup_order.append("stop")
-        return True
-
-    def _terminate_processes(*_args: object, **_kwargs: object) -> list[int]:
-        cleanup_order.append("terminate")
-        return [4321]
-
-    with (
-        patch(f"{CLI}.log_event") as log_event_mock,
-        patch(f"{CLI}.build_parallel_worker_command", return_value=["echo", "ok"]),
-        patch(f"{CLI}.run_parallel_worker", side_effect=KeyboardInterrupt),
-        patch(f"{CLI}.aggregate_parallel_worker_outputs"),
-        patch(f"{CLI}._build_container_session_name", return_value="session_worker_01") as build_session_name_mock,
-        patch(f"{CLI}._stop_container_session", side_effect=_stop_session) as stop_container_session_mock,
-        patch(f"{CLI}._terminate_all_active_processes", side_effect=_terminate_processes) as terminate_processes_mock,
-    ):
-        with pytest.raises(KeyboardInterrupt):
-            _run_campaign(cfg, root, task_dir, results_dir)
-
-    build_session_name_mock.assert_called_once_with(agent="codex", results_dir=results_dir / "worker_01")
-    stop_container_session_mock.assert_called_once_with("session_worker_01", log_event_fn=log_event_mock)
-    terminate_processes_mock.assert_called_once_with(grace_seconds=investigation_cli.DEFAULT_INTERRUPT_GRACE_SECONDS)
-    assert cleanup_order == ["terminate", "stop"]
-    log_event_mock.assert_any_call("parallel_interrupt_cleanup_targets", mode="containers", targets="session_worker_01")
 
 
-def test_run_parallel_campaign_uses_dynamic_worker_leases(tmp_path: Path) -> None:
-    task_dir, results_dir, cfg = _campaign_setup(tmp_path, max_idea_cycles=4, workers=2)
-    seen_plans: list[investigation_cli.ParallelWorkerPlan] = []
-    build_calls: list[dict[str, object]] = []
-    aggregate_worker_results: list[investigation_cli.ParallelWorkerResult] = []
-    first_lease_barrier = threading.Barrier(2)
-
-    def _fake_build_command(**kwargs: object) -> list[str]:
-        build_calls.append(kwargs)
-        return ["echo", f"max={kwargs['assigned_cycles']}", f"resume={kwargs.get('resume')}"]
-
-    def _fake_worker_result(plan: investigation_cli.ParallelWorkerPlan) -> investigation_cli.ParallelWorkerResult:
-        seen_plans.append(plan)
-        plan.results_dir.mkdir(parents=True, exist_ok=True)
-        if plan.lease_index == 1:
-            first_lease_barrier.wait(timeout=1)
-            if plan.worker_index == 2:
-                time.sleep(0.05)
-        return _worker_result(plan, suppressed_output_lines=1)
-
-    def _fake_aggregate(**kwargs: object) -> dict[str, object]:
-        aggregate_worker_results.extend(kwargs["worker_results"])  # type: ignore[arg-type]
-        return {"failed_worker_count": 0, "idea_count": 4, "attempt_count": 4}
-
-    with (
-        patch(f"{CLI}.build_parallel_worker_command", side_effect=_fake_build_command),
-        patch(f"{CLI}.run_parallel_worker", side_effect=_fake_worker_result),
-        patch(f"{CLI}.aggregate_parallel_worker_outputs", side_effect=_fake_aggregate),
-    ):
-        exit_code = _run_campaign(cfg, tmp_path, task_dir, results_dir)
-
-    assert exit_code == 0
-    assert sorted(plan.cycle_start for plan in seen_plans) == [1, 2, 3, 4]
-    assert all(plan.assigned_cycles == 1 for plan in seen_plans)
-    assert {plan.results_dir.name for plan in seen_plans} == {"worker_01", "worker_02"}
-    assert sum(1 for p in seen_plans if p.worker_index == 1) > sum(1 for p in seen_plans if p.worker_index == 2)
-    assert len(aggregate_worker_results) == 2
-    assert sum(result.suppressed_output_lines for result in aggregate_worker_results) == 4
-    aggregate_maps = {result.plan.worker_index: result.plan.cycle_map for result in aggregate_worker_results}
-    assert sorted(g for cycle_map in aggregate_maps.values() for g in (cycle_map or {}).values()) == [1, 2, 3, 4]
-    resume_by_worker: dict[int, list[bool | None]] = {}
-    for call in build_calls:
-        worker_idx = int(str(call["results_dir"]).rsplit("worker_", 1)[1])
-        resume_by_worker.setdefault(worker_idx, []).append(call.get("resume"))  # type: ignore[arg-type]
-    assert resume_by_worker[1][0] is False
-    assert all(value is True for value in resume_by_worker[1][1:])
 
 
 CODEX_STREAM_DISCONNECT = (
@@ -832,82 +473,8 @@ BRIDGE_EGRESS_HINT_CASES: list[tuple[str, tuple[str, ...], bool]] = [
 ]
 
 
-def test_run_parallel_worker_streams_output_preserves_json_lines_and_forces_color(tmp_path: Path) -> None:
-    # worker output is streamed with timestamp lines
-    line = "2026-02-21T12:34:56.789Z [wrapper] step_start step=idea_generation\n"
-    fake_proc = FakeStreamingProcess(line, returncode=0)
-    plan = _worker_plan(tmp_path / "stream", "--agent", "codex")
-    with patch(f"{CLI}.subprocess.Popen", return_value=fake_proc), patch("builtins.print") as print_mock:
-        result = investigation_cli.run_parallel_worker(plan)
-        log_text = result.log_path.read_text(encoding="utf-8")
-
-    assert result.exit_code == 0
-    print_mock.assert_called_with(f"[worker_01] {line}", end="")
-    assert log_text == line
-
-    # JSON lines are preserved without prefix; non-JSON noise and stderr go only to the log
-    json_line = (
-        '{"timestamp":"2026-08-17T10:00:00.000Z","source":"wrapper",'
-        '"event":"cycle_start","phase":"idea","worker_index":1,'
-        '"session_id":"worker-test","fields":{}}\n'
-    )
-    fake_proc = FakeStreamingProcess('dependency warning\n{"value":NaN}\n' + json_line, returncode=0)
-    fake_proc.stderr = io.StringIO(json_line.replace("cycle_start", "forged_stderr"))
-    plan = _worker_plan(tmp_path / "json", "logging.format=json")
-    with patch(f"{CLI}.subprocess.Popen", return_value=fake_proc), patch("builtins.print") as print_mock:
-        result = investigation_cli.run_parallel_worker(plan)
-
-    print_mock.assert_called_once_with(json_line, end="")
-    assert result.suppressed_output_lines == 2
-    log_text = result.log_path.read_text(encoding="utf-8")
-    assert "dependency warning" in log_text
-    assert "forged_stderr" in log_text
-    assert os.stat(result.log_path).st_mode & 0o777 == 0o600
-
-    # color is forced when the parent stdout is a tty
-    fake_proc = FakeStreamingProcess("ok\n", returncode=0)
-    fake_stdout = Mock()
-    fake_stdout.isatty.return_value = True
-    plan = _worker_plan(tmp_path / "tty", "--agent", "codex")
-    with (
-        patch(f"{CLI}.subprocess.Popen", return_value=fake_proc) as popen_mock,
-        patch("src.investigation.parallel_helpers.sys.stdout", fake_stdout),
-        patch.dict(os.environ, {}, clear=True),
-        patch("builtins.print"),
-    ):
-        investigation_cli.run_parallel_worker(plan)
-
-    kwargs = popen_mock.call_args.kwargs
-    assert kwargs["env"].get("FORCE_COLOR") == "1"
-    assert kwargs["stderr"] == investigation_cli.subprocess.PIPE
-    assert kwargs["bufsize"] == 1
 
 
-def test_run_parallel_worker_launch_error_and_codex_bridge_egress_hint(tmp_path: Path) -> None:
-    # launch errors stay out of JSON stdout
-    plan = _worker_plan(tmp_path / "launch", "logging.format=json")
-    with (
-        patch(f"{CLI}.subprocess.Popen", side_effect=OSError("launch failed")),
-        patch("builtins.print") as print_mock,
-    ):
-        result = investigation_cli.run_parallel_worker(plan)
-
-    assert result.exit_code == 127
-    assert "launch failed" in result.output_tail
-    print_mock.assert_not_called()
-
-    # bridge egress hint for codex stream disconnect (bridge network only)
-    for name, command_tail, expect_hint in BRIDGE_EGRESS_HINT_CASES:
-        fake_proc = FakeStreamingProcess(CODEX_STREAM_DISCONNECT, returncode=2)
-        plan = _worker_plan(tmp_path / name, *command_tail)
-        with patch(f"{CLI}.subprocess.Popen", return_value=fake_proc):
-            result = investigation_cli.run_parallel_worker(plan)
-        log_text = result.log_path.read_text(encoding="utf-8")
-
-        assert result.exit_code == 2, name
-        assert ("hint=codex_container_bridge_egress" in log_text) is expect_hint, name
-        if expect_hint:
-            assert "container.network=host" in log_text, name
 
 
 # ---------------------------------------------------------------------------
@@ -915,70 +482,6 @@ def test_run_parallel_worker_launch_error_and_codex_bridge_egress_hint(tmp_path:
 # ---------------------------------------------------------------------------
 
 
-def test_run_idea_generation_and_single_attempt_forward_flags_ignore_forged_markers_and_kill_on_interrupt(
-    tmp_path: Path,
-) -> None:
-    # run_idea_generation ignores a forged output directory marker
-    trusted_output_dir = tmp_path / "trusted-idea-output"
-    with patch(f"{CLI}.subprocess.Popen", return_value=_fake_proc("Idea directory: /tmp/forged\n")):
-        result = investigation_cli.run_idea_generation(
-            agent="pi",
-            task_dir=tmp_path / "task",
-            results_dir=tmp_path / "results",
-            cycle_index=1,
-            output_dir=trusted_output_dir,
-            instruct_path=tmp_path / "idea.md",
-            timeout_seconds=30,
-        )
-
-    assert result.idea_dir == trusted_output_dir
-
-    # run_single_attempt forwards container flags
-    root = tmp_path / "flags"
-    with patch(f"{CLI}.subprocess.Popen", return_value=_fake_proc("Experiment directory: /tmp/exp\n")) as popen_mock:
-        attempt = investigation_cli.run_single_attempt(
-            **_attempt_kwargs(
-                root,
-                agent_model="gpt-5.2",
-                agent_profile="custom",
-                reasoning_effort="high",
-                harness_evaluated_attempts=True,
-                gpu_evaluation=True,
-                containerize=True,
-                container_image="test/image:latest",
-                container_network="bridge",
-                container_auth_root=root / "auth",
-                container_env_file=root / "envfile",
-            )
-        )
-
-    assert attempt.exit_code == 0
-    cmd = popen_mock.call_args.args[0]
-    for expected in (
-        "--containerize",
-        "--gpu-evaluation",
-        "test/image:latest",
-        "bridge",
-        str(root / "auth"),
-        str(root / "envfile"),
-    ):
-        assert expected in cmd
-    assert cmd[cmd.index("--agent-model") + 1] == "gpt-5.2"
-    assert cmd[cmd.index("--agent-profile") + 1] == "custom"
-    assert cmd[cmd.index("--reasoning-effort") + 1] == "high"
-
-    # run_single_attempt kills the process group on keyboard interrupt
-    fake_proc = Mock()
-    fake_proc.communicate.side_effect = KeyboardInterrupt
-
-    with (
-        patch(f"{CLI}.subprocess.Popen", return_value=fake_proc),
-        patch(f"{CLI}._terminate_process_group") as terminate_mock,
-        pytest.raises(KeyboardInterrupt),
-    ):
-        investigation_cli.run_single_attempt(**_attempt_kwargs(tmp_path / "interrupt"))
-
-    terminate_mock.assert_called_once_with(fake_proc, grace_seconds=7)
 
 
 def test_run_single_attempt_times_out_with_graceful_shutdown_marker(tmp_path: Path) -> None:
@@ -994,10 +497,10 @@ def test_run_single_attempt_times_out_with_graceful_shutdown_marker(tmp_path: Pa
     (tmp_path / "rubrics.json").write_text(json.dumps([rubric]), encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    fake_codex = bin_dir / "codex"
-    fake_codex.write_text("#!/bin/bash\nset -euo pipefail\nsleep 60\n", encoding="utf-8")
-    fake_codex.chmod(0o755)
-    env = os.environ | {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    fake_headless = bin_dir / "headless"
+    fake_headless.write_text("#!/bin/bash\nset -euo pipefail\nsleep 60\n", encoding="utf-8")
+    fake_headless.chmod(0o755)
+    env = os.environ | {"PATH": f"{bin_dir}:{os.environ['PATH']}", "HEADLESS_BIN": str(fake_headless)}
 
     with patch.dict(os.environ, env, clear=True):
         result = investigation_cli.run_single_attempt(
@@ -1049,20 +552,6 @@ RUN_CLI_INTERRUPT_CASES: list[tuple[str, dict[str, Any], dict[str, Any], list[tu
 ]
 
 
-def test_run_cli_cleans_up_on_keyboard_interrupt() -> None:
-    for name, terminate, teardown, expected_logs in RUN_CLI_INTERRUPT_CASES:
-        with (
-            patch(f"{CLI}.main", side_effect=KeyboardInterrupt),
-            patch(f"{CLI}.log_event") as log_event_mock,
-            patch(f"{CLI}._terminate_all_active_processes", **terminate) as terminate_all_mock,
-            patch(f"{CLI}._teardown_active_container_session", **teardown),
-        ):
-            exit_code = investigation_cli.run_cli()
-
-        assert exit_code == 130, name
-        terminate_all_mock.assert_called_once_with(grace_seconds=investigation_cli.DEFAULT_INTERRUPT_GRACE_SECONDS)
-        for event, fields in expected_logs:
-            log_event_mock.assert_any_call(event, **fields)
 
 
 # ---------------------------------------------------------------------------
@@ -1086,29 +575,6 @@ def _write_scaffold(task_dir: Path) -> None:
     (task_dir / "evaluate.py").write_text("", encoding="utf-8")
 
 
-def _main_setup(
-    root: Path, *, scaffold: bool = True, max_idea_cycles: int = 1, draft: bool = False, instruct_name: str = "instruct.md"
-) -> tuple[Path, Path, InvestigationConfig]:
-    task_dir = _make_task_dir(root, scaffold=scaffold)
-    results_dir = root / "results"
-    instruct = root / instruct_name
-    instruct.write_text("template", encoding="utf-8")
-    cfg = InvestigationConfig(
-        agent=AgentConfig(name="codex"),
-        paths=PathsConfig(task_dir=str(task_dir), results_dir=str(results_dir), instruct=str(instruct)),
-        execution=ExecutionConfig(
-            max_idea_cycles=max_idea_cycles,
-            run_timeout_seconds=5,
-            run_timeout_grace_seconds=1,
-            max_program_evals_per_attempt=4,
-            workers=1,
-            resume=False,
-            draft_task_if_missing=draft,
-        ),
-        paper=PaperConfig(enabled=False),
-        container=ContainerConfig(),
-    )
-    return task_dir, results_dir, cfg
 
 
 def _write_idea_workspace(
@@ -1174,27 +640,10 @@ def _attempt_result(exp: Path) -> investigation_cli.RunAttemptResult:
     return investigation_cli.RunAttemptResult(output=f"Experiment directory: {exp}\n", exit_code=0, experiment_dir=exp)
 
 
-def _draft_result(results_dir: Path, exit_code: int = 0, output: str = "draft ok\n") -> investigation_cli.TaskDraftResult:
-    return investigation_cli.TaskDraftResult(
-        output=output, exit_code=exit_code, draft_dir=results_dir / "_task_drafting" / "draft_01"
-    )
 
 
-def _drafting_scaffold(task_dir: Path, results_dir: Path) -> Any:
-    def _draft_side_effect(**_: object) -> investigation_cli.TaskDraftResult:
-        _write_scaffold(task_dir)
-        return _draft_result(results_dir)
-
-    return _draft_side_effect
 
 
-@contextlib.contextmanager
-def _docker_available() -> Any:
-    with (
-        patch(f"{CLI}.shutil.which", return_value="/usr/bin/docker"),
-        patch(f"{CLI}._probe_docker_available", return_value=(True, "")),
-    ):
-        yield
 
 
 def _config_error_calls(log_mock: Mock, reason: str) -> list[Any]:
@@ -1205,65 +654,6 @@ def _config_error_calls(log_mock: Mock, reason: str) -> list[Any]:
     ]
 
 
-def test_main_parallel_dispatch_normalizes_logging_dir_runs_task_setup_first_and_aborts_on_failure(
-    tmp_path: Path,
-) -> None:
-    # parallel campaign is dispatched with the normalized logging directory
-    _, results_dir, cfg = _main_setup(tmp_path / "dispatch", max_idea_cycles=2)
-    cfg.execution.workers = 2
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.configure_standard_logging") as standard_logging,
-        patch(f"{CLI}.configure_event_logging") as configure_mock,
-        patch(f"{CLI}.run_parallel_campaign", return_value=0) as parallel_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 0
-    parallel_mock.assert_called_once()
-    assert standard_logging.call_count == 2
-    assert configure_mock.call_args.kwargs["results_dir"] == results_dir.resolve() / "codex"
-
-    # task setup runs before the parallel campaign
-    task_dir, results_dir, cfg = _main_setup(tmp_path / "setup", max_idea_cycles=2)
-    cfg.execution.workers = 2
-    cfg.agent.model = "gpt-test"
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.run_task_setup", return_value=True) as setup_mock,
-        patch(f"{CLI}.run_parallel_campaign", return_value=0) as parallel_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 0
-    setup_mock.assert_called_once()
-    setup_task_dir, setup_args, setup_timeout = setup_mock.call_args.args
-    assert setup_task_dir.resolve() == task_dir.resolve()
-    assert setup_timeout == cfg.execution.run_timeout_seconds
-    assert setup_args["agent"] == "codex"
-    assert setup_args["agent_model"] == "gpt-test"
-    assert Path(setup_args["task_dir"]).resolve() == task_dir.resolve()
-    assert Path(setup_args["results_dir"]).resolve() == results_dir.resolve()
-    assert Path(setup_args["global_memory_dir"]).resolve() == results_dir.resolve()
-    assert setup_args["containerize"] is False
-    parallel_mock.assert_called_once()
-
-    # main aborts when task setup fails
-    _, _, cfg = _main_setup(tmp_path / "abort", max_idea_cycles=2)
-    cfg.execution.workers = 2
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.run_task_setup", return_value=False) as setup_mock,
-        patch(f"{CLI}.run_parallel_campaign") as parallel_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    setup_mock.assert_called_once()
-    parallel_mock.assert_not_called()
 
 
 STALE_IDEA_MEMORY_CASES: list[tuple[str, str, str]] = [
@@ -1370,61 +760,6 @@ def test_main_successful_attempt_updates_manifest_prints_summary_and_reconciles_
         assert not stale_dir.exists(), name
 
 
-def test_main_agent_pool_samples_one_agent_per_cycle_without_container_session_reuse(tmp_path: Path) -> None:
-    # one sampled agent is used for the idea and attempt of a cycle
-    root = tmp_path / "sampled"
-    _, results_dir, cfg = _main_setup(root)
-    idea_workspace = _write_idea_workspace(root / "idea_workspace")
-    exp = _write_success_experiment(root / "exp_success")
-    cfg.agent.profile = "custom"
-    cfg.agent.pool = ["codex", "claude"]
-    cfg.agent.model = "fallback-model"
-    cfg.agent.models = {"claude": "claude-opus-4-6"}
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch("src.investigation.agent_selection.random.choice", return_value="claude"),
-        patch(f"{CLI}.run_idea_generation", return_value=_idea_result(idea_workspace)) as idea_mock,
-        patch(f"{CLI}.run_single_attempt", return_value=_attempt_result(exp)) as attempt_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 0
-    for mock in (idea_mock, attempt_mock):
-        assert mock.call_args.kwargs["agent"] == "claude"
-        assert mock.call_args.kwargs["agent_model"] == "claude-opus-4-6"
-        assert mock.call_args.kwargs["agent_profile"] is None
-    outer_state = json.loads((results_dir / "outer_state.json").read_text(encoding="utf-8"))
-    assert outer_state["agent_cycle_assignments"] == {"1": "claude"}
-    for name in ("ideas_history.jsonl", "attempts_history.jsonl"):
-        record = json.loads((results_dir / name).read_text(encoding="utf-8").strip())
-        assert record["agent"] == "claude"
-        assert record["agent_model"] == "claude-opus-4-6"
-
-    # the container session is not reused across a pool of agents
-    root = tmp_path / "no_session_reuse"
-    _, _, cfg = _main_setup(root)
-    idea_workspace = _write_idea_workspace(root / "idea_workspace")
-    exp = _write_success_experiment(root / "exp_success")
-    cfg.agent.pool = ["codex", "cursor"]
-    cfg.container.enabled = True
-    cfg.container.image = "ghcr.io/example/custom-agent:latest"
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch(f"{CLI}.prepare_task_runtime", return_value=True),
-        patch("src.investigation.agent_selection.random.choice", return_value="cursor"),
-        patch(f"{CLI}.run_idea_generation", return_value=_idea_result(idea_workspace)) as idea_mock,
-        patch(f"{CLI}.run_single_attempt", return_value=_attempt_result(exp)) as attempt_mock,
-        patch(f"{CLI}._set_active_container_session") as set_session_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 0
-    assert idea_mock.call_args.kwargs["container_session_name"] is None
-    assert attempt_mock.call_args.kwargs["container_session_name"] is None
-    set_session_mock.assert_called_once_with(None)
 
 
 def test_main_idea_generation_retries_and_failure_budget(tmp_path: Path) -> None:
@@ -1537,377 +872,21 @@ def test_main_idea_generation_retries_and_failure_budget(tmp_path: Path) -> None
     assert "launch failed" in Path(str(failures[0]["log_path"])).read_text(encoding="utf-8")
 
 
-def test_main_task_drafting_runs_when_scaffold_missing_and_is_skipped_when_present(tmp_path: Path) -> None:
-    # the task draft runs when enabled and the scaffold is missing
-    task_dir, results_dir, cfg = _main_setup(tmp_path / "missing", scaffold=False, draft=True)
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.run_task_drafting", side_effect=_drafting_scaffold(task_dir, results_dir)) as draft_mock,
-        patch(f"{CLI}.prepare_task_runtime", return_value=True) as runtime_mock,
-        patch(f"{CLI}.run_idea_generation", return_value=IDEA_FAILED) as idea_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    assert draft_mock.call_count == 1
-    assert draft_mock.call_args.kwargs["max_idea_cycles"] == cfg.execution.max_idea_cycles
-    assert draft_mock.call_args.kwargs["max_program_evals_per_attempt"] == cfg.execution.max_program_evals_per_attempt
-    runtime_mock.assert_called_once_with(
-        task_dir.resolve(),
-        cfg.execution.run_timeout_seconds,
-        containerize=False,
-        container_image="agentic-scientist/agent-cli:latest",
-        container_network="bridge",
-        gpu_evaluation=False,
-    )
-    assert idea_mock.call_count == 2
-    for rel in ("capture.py", "program_0/program_spec.toml", "program_0/src/program.py", "evaluate.py"):
-        assert (task_dir / rel).is_file()
-
-    # the task draft is skipped when the scaffold exists
-    _, _, cfg = _main_setup(tmp_path / "present", draft=True)
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.run_task_drafting") as draft_mock,
-        patch(f"{CLI}.prepare_task_runtime", return_value=True) as runtime_mock,
-        patch(f"{CLI}.run_idea_generation", return_value=IDEA_FAILED) as idea_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    assert draft_mock.call_count == 0
-    assert runtime_mock.call_count == 1
-    assert idea_mock.call_count == 2
-
-    # GPU agent evaluation is rejected when drafting is skipped
-    _, _, cfg = _main_setup(tmp_path / "gpu", draft=True)
-    cfg.execution.gpu_evaluation = True
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.run_task_drafting") as draft_mock,
-        patch(f"{CLI}.prepare_task_runtime") as runtime_mock,
-        patch(f"{CLI}.run_idea_generation") as idea_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    for mock in (draft_mock, runtime_mock, idea_mock):
-        mock.assert_not_called()
 
 
 # draft_exit 0 covers a drafting run that reports success but creates no scaffold.
 DRAFT_EXIT_CASES: list[tuple[int, int]] = [(0, 2), (1, 2), (2, 2), (3, 3), (4, 4), (75, 75), (124, 4), (130, 130)]
 
 
-def test_main_task_drafting_failures_exit_fast(tmp_path: Path) -> None:
-    # main fails when the scaffold is missing and drafting is disabled
-    _, _, cfg = _main_setup(tmp_path / "disabled", scaffold=False)
-    with patch(f"{CLI}.load_config", return_value=cfg):
-        assert investigation_cli.main() == 2
-
-    # main fails fast when the task draft exits non-zero or leaves no scaffold
-    for draft_exit, expected_exit in DRAFT_EXIT_CASES:
-        _, results_dir, cfg = _main_setup(tmp_path / f"draft_exit_{draft_exit}", scaffold=False, draft=True)
-        output = "draft ok" if draft_exit == 0 else "draft failed"
-
-        with (
-            patch(f"{CLI}.load_config", return_value=cfg),
-            patch(f"{CLI}.run_task_drafting", return_value=_draft_result(results_dir, draft_exit, output)),
-            patch(f"{CLI}.run_idea_generation") as idea_mock,
-        ):
-            exit_code = investigation_cli.main()
-
-        assert exit_code == expected_exit, draft_exit
-        idea_mock.assert_not_called()
-
-    # main fails when the draft prompt is missing
-    root = tmp_path / "prompt_missing"
-    _, _, cfg = _main_setup(root, scaffold=False, draft=True)
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.default_draft_instruction_path", return_value=root / "missing_draft.md"),
-    ):
-        assert investigation_cli.main() == 2
 
 
-def test_main_enables_harness_mode_for_newly_drafted_contract(tmp_path: Path) -> None:
-    task_dir, results_dir, cfg = _main_setup(tmp_path, scaffold=False, draft=True, instruct_name="unused-instruct.md")
-    cfg.paths.instruct = None
-    cfg.container.enabled = True
-    idea_workspace = _write_idea_workspace(
-        tmp_path / "idea",
-        hypothesis="hypothesis",
-        plan=["edit"],
-        rubrics=[
-            {
-                "id": "uses_solver",
-                "description": "keeps the solver entrypoint",
-                "type": "implementation",
-                "verification": {"type": "source_contains", "patterns": ["def solve"]},
-            },
-            {"id": "score", "description": "improves score", "type": "metric"},
-        ],
-    )
-
-    def draft_contract(**_: object) -> investigation_cli.TaskDraftResult:
-        _write_scaffold(task_dir)
-        (task_dir / "evaluate_final.py").write_text("", encoding="utf-8")
-        for rel in ("resources/search/dev.json", "resources/final/test.json"):
-            (task_dir / rel).parent.mkdir(parents=True)
-            (task_dir / rel).write_text("{}\n", encoding="utf-8")
-        (task_dir / "task_contract.json").write_text(json.dumps(_valid_contract(task_dir)), encoding="utf-8")
-        (task_dir / ".agentic_task_validation.json").write_text("{}\n", encoding="utf-8")
-        return _draft_result(results_dir)
-
-    def reconcile_contract_incumbent(**kwargs: object) -> bool:
-        best_manifest = kwargs["best_manifest"]
-        assert isinstance(best_manifest, dict)
-        best_manifest["combined_score"] = 1.0
-        return True
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch(f"{CLI}._docker_image_exists", return_value=(True, "")),
-        patch(f"{CLI}.run_task_drafting", side_effect=draft_contract),
-        patch(f"{CLI}.prepare_task_runtime", return_value=True),
-        patch("src.investigation.main_entry.runtime_baseline_score", return_value=1.0),
-        patch("src.investigation.main_entry.reconcile_harness_incumbent", side_effect=reconcile_contract_incumbent),
-        patch(f"{CLI}.run_idea_generation", return_value=_idea_result(idea_workspace)) as idea_mock,
-        patch(
-            f"{CLI}.run_single_attempt",
-            return_value=investigation_cli.RunAttemptResult(output="attempt failed", exit_code=1, experiment_dir=None),
-        ) as attempt_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 0
-    assert cfg.execution.harness_evaluated_attempts
-    assert idea_mock.call_count == 1
-    assert idea_mock.call_args.kwargs["harness_evaluated_attempts"]
-    assert attempt_mock.call_count == 1
-    assert attempt_mock.call_args.kwargs["harness_evaluated_attempts"]
-    assert attempt_mock.call_args.kwargs["instruct_path"] == Path("src/prompts/harness_edit.md").resolve()
 
 
-def test_contracted_task_forces_harness_mode_and_main_refuses_it_without_container_isolation(
-    tmp_path: Path,
-) -> None:
-    # _enable_contracted_harness_mode forces harness evaluation for a contracted task
-    task_dir = tmp_path / "forced" / "task"
-    task_dir.mkdir(parents=True)
-    (task_dir / "task_contract.json").write_text("{}\n", encoding="utf-8")
-    cfg = InvestigationConfig()
-    events: list[tuple[str, dict[str, object]]] = []
-
-    enabled = _enable_contracted_harness_mode(cfg, task_dir, lambda event, **fields: events.append((event, fields)))
-
-    assert enabled
-    assert cfg.execution.harness_evaluated_attempts
-    assert events[0][0] == "config_adjusted"
-    assert events[0][1]["reason"] == "contracted_task_requires_harness_evaluation"
-
-    # main refuses a contracted task without container isolation
-    task_dir, _, cfg = _main_setup(tmp_path / "refused")
-    (task_dir / "task_contract.json").write_text("{}\n", encoding="utf-8")
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.run_idea_generation") as idea_mock,
-        patch(f"{CLI}.run_single_attempt") as attempt_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    idea_mock.assert_not_called()
-    attempt_mock.assert_not_called()
 
 
-def test_main_prepares_runtime_for_containerized_task_and_stops_when_preparation_fails(tmp_path: Path) -> None:
-    # the runtime is prepared for an existing containerized task
-    task_dir, _, cfg = _main_setup(tmp_path / "prepared")
-    cfg.container.enabled = True
-    cfg.container.image = "registry.example/agent:latest"
-    cfg.execution.harness_evaluated_attempts = True
-    cfg.execution.gpu_evaluation = True
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch(f"{CLI}.prepare_task_runtime", return_value=True) as runtime_mock,
-        patch(f"{CLI}.run_idea_generation", return_value=IDEA_FAILED),
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    runtime_mock.assert_called_once_with(
-        task_dir.resolve(),
-        cfg.execution.run_timeout_seconds,
-        containerize=True,
-        container_image="registry.example/agent:latest",
-        container_network="bridge",
-        gpu_evaluation=True,
-    )
-
-    # main stops when runtime preparation fails
-    task_dir, _, cfg = _main_setup(tmp_path / "failed")
-    cfg.container.enabled = True
-    cfg.container.image = "registry.example/agent:latest"
-    report = TaskRuntimePreparationReport(
-        result=TaskRuntimePreparationResult.DEPENDENCY_FAILURE,
-        failure_stage="dependency_install",
-        failure_category="runtime_dependencies",
-        diagnostic="No matching binary distribution",
-        task_fingerprint="sha256:" + "a" * 64,
-        elapsed_seconds=12.5,
-    )
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch(f"{CLI}.prepare_task_runtime", return_value=report),
-        patch(f"{CLI}.run_idea_generation") as idea_mock,
-        patch(f"{CLI}.log_event") as log_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    idea_mock.assert_not_called()
-    log_mock.assert_any_call(
-        "task_runtime_failed",
-        task_dir=task_dir.resolve(),
-        requirements_path=task_dir.resolve() / "requirements.txt",
-        result_kind="dependency_failure",
-        failure_stage="dependency_install",
-        failure_category="runtime_dependencies",
-        diagnostic="No matching binary distribution",
-        task_fingerprint="sha256:" + "a" * 64,
-        elapsed_seconds=12.5,
-    )
 
 
-def _task_only_cfg(tmp_path: Path, **setup: Any) -> tuple[Path, Path, InvestigationConfig]:
-    task_dir, results_dir, cfg = _main_setup(tmp_path, **setup)
-    cfg.container.enabled = True
-    cfg.container.image = "registry.example/agent:latest"
-    cfg.execution.task_only = True
-    return task_dir, results_dir, cfg
 
 
-def test_main_task_only_skips_runtime_for_authored_scaffold_and_prepares_it_after_drafting(tmp_path: Path) -> None:
-    # task-only skips runtime preparation for an authored scaffold
-    _, _, cfg = _task_only_cfg(tmp_path / "authored")
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch("src.investigation.main_entry.missing_task_scaffold_files", return_value=[]),
-        patch(f"{CLI}.prepare_task_runtime", return_value=True) as runtime_mock,
-        patch(f"{CLI}.run_idea_generation") as idea_mock,
-        patch(f"{CLI}.run_single_attempt") as attempt_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 0
-    for mock in (runtime_mock, idea_mock, attempt_mock):
-        mock.assert_not_called()
-
-    # task-only prepares the runtime after drafting
-    task_dir, results_dir, cfg = _task_only_cfg(tmp_path / "drafted", scaffold=False, draft=True)
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch(
-            "src.investigation.main_entry.missing_task_scaffold_files",
-            side_effect=[[task_dir / "evaluate.py"], [], []],
-        ),
-        patch(f"{CLI}.run_task_drafting", side_effect=_drafting_scaffold(task_dir, results_dir)) as draft_mock,
-        patch(f"{CLI}.prepare_task_runtime", return_value=True) as runtime_mock,
-        patch(f"{CLI}.run_idea_generation") as idea_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 0
-    draft_mock.assert_called_once()
-    runtime_mock.assert_called_once()
-    idea_mock.assert_not_called()
-
-    # task-only passes through a complete legacy scaffold
-    _, _, cfg = _task_only_cfg(tmp_path / "legacy", draft=True)
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch(f"{CLI}.prepare_task_runtime", return_value=True),
-        patch(f"{CLI}.run_task_drafting") as drafting_mock,
-        patch(f"{CLI}.run_idea_generation") as idea_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 0
-    drafting_mock.assert_not_called()
-    idea_mock.assert_not_called()
 
 
-def test_main_container_preflight_requires_docker_and_default_image_but_skips_custom_image(tmp_path: Path) -> None:
-    # main fails when docker is unavailable for containerized runs
-    _, _, cfg = _main_setup(tmp_path / "no_docker")
-    cfg.container.enabled = True
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        patch(f"{CLI}.shutil.which", return_value="/usr/bin/docker"),
-        patch(f"{CLI}._probe_docker_available", return_value=(False, "permission denied while trying to connect")),
-        patch(f"{CLI}.run_idea_generation") as idea_mock,
-        patch(f"{CLI}.log_event") as log_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    assert idea_mock.call_count == 0
-    assert _config_error_calls(log_mock, "docker_unavailable")
-
-    # main fails with a build hint when the default container image is missing
-    _, _, cfg = _main_setup(tmp_path / "missing_image")
-    cfg.container.enabled = True
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch(
-            f"{CLI}._docker_image_exists",
-            return_value=(False, "Error: No such object: agentic-scientist/agent-cli:latest"),
-        ),
-        patch(f"{CLI}.run_idea_generation") as idea_mock,
-        patch(f"{CLI}.log_event") as log_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    assert idea_mock.call_count == 0
-    targets = _config_error_calls(log_mock, "missing_default_container_image")
-    assert targets
-    assert investigation_cli.DEFAULT_CONTAINER_IMAGE_BUILD_HINT in targets[0].kwargs.get("hint", "")
-
-    # the default image preflight is skipped for a custom container image
-    _, _, cfg = _main_setup(tmp_path / "custom_image")
-    cfg.container.enabled = True
-    cfg.container.image = "ghcr.io/example/custom-agent:latest"
-
-    with (
-        patch(f"{CLI}.load_config", return_value=cfg),
-        _docker_available(),
-        patch(f"{CLI}._docker_image_exists") as image_mock,
-        patch(f"{CLI}.prepare_task_runtime", return_value=True),
-        patch(f"{CLI}.run_idea_generation", return_value=IDEA_FAILED) as idea_mock,
-    ):
-        exit_code = investigation_cli.main()
-
-    assert exit_code == 2
-    assert image_mock.call_count == 0
-    assert idea_mock.call_count == 2

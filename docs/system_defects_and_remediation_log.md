@@ -44,7 +44,7 @@ circpack 后续消融阶段生成的插桩副本在评估器调用 solution() �
 ### 已做处理与边界
 
 安装 poppler-utils，并写入本地扩展镜像构建文件：
-[codex.Dockerfile](../deploy/local/docker/codex.Dockerfile)。可复用镜像标签为 agentic-scientist/agent-cli:codex-0.169.0-pdf。论文随后成功编译并完成检查。
+`deploy/local/docker/codex.Dockerfile`（2026-11-18 随 Docker 一起删除，见 FIX-005）。当时可复用镜像标签为 agentic-scientist/agent-cli:codex-0.169.0-pdf。论文随后成功编译并完成检查。
 
 修复作用于本地扩展镜像，不能据此称官方基础镜像已修复。该 Dockerfile 的基础镜像仍使用 latest，不能保证未来重新构建完全一致。
 
@@ -68,7 +68,7 @@ Debian 将 /usr/share/texmf/web2c/texmf.cnf 链接至 /usr/share/texlive/texmf-d
 - engines/ai-scientist-v3/src/agents/skills/validate-paper/scripts/validate_compile_inputs.py
 - engines/ai-scientist-v3/tests/paper/test_paper_step_evidence_latex.py
 
-补丁保存在 [FIX-003-tex-path-compatibility.patch](../patches/ai-scientist-v3/FIX-003-tex-path-compatibility.patch)，已作为提交 e70c595 应用，请勿重复应用。已补测试覆盖跨允许目录链接、链接到外部文件、从未批准位置链接到允许文件。相关测试 13 项通过；当时完整测试结果为 2207 passed、1 skipped，Ruff 和 Mypy 通过。这些是此前修复的验证记录，本次建档没有重新运行测试。
+补丁曾作为提交 e70c595 应用（2026-11-18 起论文阶段已随引擎精简删除，见 FIX-005）。已补测试覆盖跨允许目录链接、链接到外部文件、从未批准位置链接到允许文件。相关测试 13 项通过；当时完整测试结果为 2207 passed、1 skipped，Ruff 和 Mypy 通过。这些是此前修复的验证记录，本次建档没有重新运行测试。
 
 ### 后续维护
 
@@ -79,6 +79,15 @@ Debian 将 /usr/share/texmf/web2c/texmf.cnf 链接至 /usr/share/texlive/texmf-d
 单独续跑 posthoc 时，旧任务严格快照检查把运行环境文件计入比较，触发失败。核对任务源码一致后，使用 posthoc,paper 联合续跑路径完成任务，没有改写快照摘要。
 
 当前只记录为绕过方案。后续应检查任务快照的文件边界及不同续跑路径的一致性，复现后再决定修复。不能通过随意排除文件、更新摘要或放松完整性检查消除报警。本轮优先处理 FIX-001 和 FIX-002，此项另行排期。
+
+## FIX-005 引擎精简并改为原生运行（2026-11-18）
+
+- **类别**：架构调整，不是缺陷修复。
+- **原因**：平台其余部分都在本机运行，只有引擎跑在 Docker 里，而且主 Agent 实际只用得到引擎的想法搜索循环。容器还带来两个问题：容器里没有 GPU 运行时，引擎只能用 CPU；容器主目录 `.agent_home` 里有一份 Codex 登录凭据，放进工作区后差点被快照提交进 git。
+- **修改**：`engines/ai-scientist-v3` 只保留 investigation 循环，删除流水线、任务起草、消融、事后分析、上游最终评估、写论文、外部评审、harness 评估、容器、并行 worker、版本快照和网页查看器，详见 `patches/ai-scientist-v3/README.md`。新增 `paths.task_python`，候选程序用任务自己的环境评估。TAR-Lab 适配器改为直接调用 `python -m src.investigation.cli`；论文编译改用本机 Tectonic。FIX-003 所在的论文阶段已删除。
+- **验证**：引擎剩余 103 个测试、平台全部测试、ruff 和 mypy 通过；用真实 Codex 在本机跑通 circpack（见提交说明）；Project B 的论文副本用 Tectonic 编译成功。
+- **剩余风险**：不再与上游同步；原生运行时 Agent 与本机共享文件系统和登录状态，没有容器隔离，安全边界与 TAR-Lab 其他执行者相同。
+- **回退**：`git revert` 本次提交；上游原版仍在 `engines/ai-scientist-v3-original/`。
 
 ## 自动修复能力的建设顺序
 

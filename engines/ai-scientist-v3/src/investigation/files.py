@@ -8,7 +8,6 @@ import logging
 import os
 import shutil
 import stat
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -20,41 +19,12 @@ from .constants import (
     EXPERIMENT_DIR_RE,
     IDEA_DIR_RE,
     MARKDOWN_HEADING_RE,
-    PAPER_DIR_RE,
     PROGRAM_DIR_RE,
 )
 from .program_spec import ProgramSpecError, load_program_spec, resolve_entrypoint
 from .task_data_cache import require_no_legacy_data_cache
 
 TASK_COPY_IGNORE_FILENAME = ".agentic_task_ignore"
-
-
-def confirm_prune_warning() -> None:
-    """Print a prominent prune-without-container warning and wait for Enter.
-
-    When stdin is not a TTY (e.g. CI or piped input) the prompt is skipped
-    and a log message is emitted instead.
-    """
-    banner = (
-        "\n"
-        "╔══════════════════════════════════════════════════════════════╗\n"
-        "║  WARNING: Pruning may be ineffective without containers!   ║\n"
-        "║                                                            ║\n"
-        "║  The agent is NOT containerized, so it will still have     ║\n"
-        "║  access to archived history and idea files from previous   ║\n"
-        "║  rounds/chapters. Pruning only resets the orchestrator     ║\n"
-        "║  state — the agent can still read old files on disk.       ║\n"
-        "║                                                            ║\n"
-        "║  Use container.enabled=true for full round isolation.      ║\n"
-        "╚══════════════════════════════════════════════════════════════╝\n"
-    )
-    print(banner, file=sys.stderr, flush=True)
-
-    if sys.stdin.isatty():
-        print("Press Enter to continue or Ctrl+C to abort... ", file=sys.stderr, end="", flush=True)
-        input()
-    else:
-        logger.info("Non-interactive session detected — continuing without confirmation.")
 
 
 def utc_now() -> str:
@@ -334,9 +304,7 @@ def load_instructions(
     extra_replacements: dict[str, str] | None = None,
 ) -> str:
     """Load instructions from markdown file, resolving prompt placeholders."""
-    from src.task_drafting.prompt_contract import expand_evidence_contract
-
-    template = expand_evidence_contract(path.read_text(encoding="utf-8"))
+    template = path.read_text(encoding="utf-8")
     task_goal, task_rubrics, task_md_path = read_task_sections(task_dir)
     replacements = {
         "TASK_DIR": str(task_dir),
@@ -505,28 +473,13 @@ def parse_idea_dir(run_output: str) -> Path | None:
     return _parse_directory_marker(run_output, IDEA_DIR_RE)
 
 
-def parse_paper_dir(run_output: str) -> Path | None:
-    """Parse paper dir."""
-    return _parse_directory_marker(run_output, PAPER_DIR_RE)
-
-
-def missing_task_scaffold_files(task_dir: Path, *, require_contract_v1: bool = False) -> list[Path]:
-    """Check scaffold files; explicit drafted validation also requires its receipt."""
+def missing_task_scaffold_files(task_dir: Path) -> list[Path]:
+    """Check the task scaffold: capture.py, evaluate.py and the program_0 entrypoint."""
     required = [
         task_dir / "capture.py",
         task_dir / "evaluate.py",
         task_dir / "program_0" / "program_spec.toml",
     ]
-    contract_path = task_dir / "task_contract.json"
-    if require_contract_v1 or contract_path.exists():
-        required.extend(
-            [
-                contract_path,
-                task_dir / "evaluate_final.py",
-            ]
-        )
-    if require_contract_v1:
-        required.append(task_dir / ".agentic_task_validation.json")
     return _missing_scaffold_sources(task_dir, required)
 
 

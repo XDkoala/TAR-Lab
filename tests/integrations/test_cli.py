@@ -27,8 +27,8 @@ def test_undermind_status_and_logout_without_credentials(
 
 
 def test_engine_summary_exit_code(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    (tmp_path / "pipeline_events.jsonl").write_text(
-        json.dumps({"event": "pipeline_end", "fields": {"status": "completed"}}) + "\n"
+    (tmp_path / "events.jsonl").write_text(
+        json.dumps({"event": "finished", "fields": {"cycles_completed": 1}}) + "\n"
     )
     assert main(["engine", "summary", str(tmp_path)]) == 0
     assert json.loads(capsys.readouterr().out)["completed"] is True

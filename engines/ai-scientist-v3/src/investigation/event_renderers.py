@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .logo import render_logo
-from .paper_events import is_paper_heartbeat, paper_gate_name, paper_gate_qualifier
-from .review_summary import format_review_result, format_revision_review
 from .terminal_ui import (
     ERROR_SUFFIXES as _ERROR_SUFFIXES,
     PROGRESS_LABELS as _PROGRESS_LABELS,
@@ -74,9 +72,6 @@ class HumanRenderer:
             self.stream.flush()
 
     def _event_lines(self, event: str, fields: dict[str, Any]) -> list[str]:
-        generic = self._generic_event_lines(event, fields)
-        if generic is not None:
-            return generic
         if event == "run_hydra_config":
             return self._verbose_event(event, fields) if self.verbose else []
         if event == "run_config":
@@ -164,8 +159,6 @@ class HumanRenderer:
             return [
                 self._styled(message, "detail")
             ]
-        if event == "task_drafting_checkpoint":
-            return self._task_drafting_checkpoint(fields)
         if event == "preparation_step":
             label = terminal_text(fields.get("label", "Preparing task"))
             state = fields.get("state")
@@ -186,220 +179,11 @@ class HumanRenderer:
             return self._error(event, fields)
         return self._verbose_event(event, fields) if self.verbose else []
 
-    def _task_drafting_checkpoint(self, fields: dict[str, Any]) -> list[str]:
-        label = terminal_text(
-            fields.get("label") or str(fields.get("gate", "task drafting")).replace("_", " ")
-        )
-        state = str(fields.get("state", "completed"))
-        verdict = str(fields.get("verdict", "")).upper()
-        elapsed = fields.get("elapsed")
-        if state == "started":
-            if self.transient_progress:
-                return []
-            return [self._styled(f"  {label}…", "running")]
-        outcome = verdict or {
-            "completed": "complete",
-            "failed": "FAILED",
-            "retrying": "retrying",
-            "skipped": "skipped",
-        }.get(state, state)
-        suffix = f" · {terminal_text(outcome)}"
-        if elapsed:
-            suffix += f" · {terminal_text(elapsed)}"
-        semantic = (
-            "success"
-            if state == "completed" and verdict != "FAIL"
-            else "failure"
-            if state == "failed" or verdict == "FAIL"
-            else "warning"
-        )
-        lines = [self._styled(f"  {label}{suffix}", semantic)]
-        for key, prefix in (
-            ("failed_dimensions", "Failed"),
-            ("fixed", "Fixed"),
-            ("still_failed", "Still failing"),
-            ("regressed", "Regressed"),
-        ):
-            values = fields.get(key)
-            if isinstance(values, list) and values:
-                rendered = ", ".join(terminal_text(value, limit=80) for value in values[:12])
-                lines.append(f"    {prefix}: {rendered}")
-        cost_message = fields.get("cost_message")
-        if state != "started" and cost_message:
-            rendered_cost = terminal_text(cost_message)
-            if fields.get("pipeline_elapsed"):
-                rendered_cost += f" · Time {terminal_text(fields['pipeline_elapsed'])}"
-            lines.append(self._styled(rendered_cost, "detail"))
-        return lines
-
-    def _generic_event_lines(
-        self,
-        event: str,
-        fields: dict[str, Any],
-    ) -> list[str] | None:
-        if event == "pipeline_start":
-            task = terminal_text(fields.get("task", "unknown"))
-            run_id = terminal_text(fields.get("run_id", ""))
-            phases = fields.get("phases", [])
-            phase_text = (
-                ", ".join(str(item) for item in phases) if isinstance(phases, list) else phases
-            )
-            lines: list[str] = []
-            if fields.get("show_run_header") is True:
-                lines.extend(self._logo())
-                if fields.get("investigation_selected"):
-                    lines.extend(["", *self._run_header(fields)])
-                lines.append("")
-            lines.extend(
-                [
-                    self._styled(
-                        f"Pipeline · {task}" + (f" · run {run_id}" if run_id else ""),
-                        "phase",
-                    ),
-                    self._styled(f"Phases: {terminal_text(phase_text)}", "detail"),
-                ]
-            )
-            return lines
-        if event in {"phase_start", "stage_start"}:
-            label = terminal_text(
-                fields.get("label") or fields.get("phase_name") or fields.get("stage")
-            )
-            current = fields.get("current")
-            total = fields.get("total")
-            position = f" · {current}/{total}" if current is not None and total is not None else ""
-            return [self._styled(f"{label}{position}", "phase")]
-        if event in {"variant_start", "analysis_start"}:
-            noun = "Variant" if event == "variant_start" else "Analysis"
-            name = terminal_text(
-                fields.get("title") or fields.get("name") or fields.get("id") or "unknown"
-            )
-            current = fields.get("current", "?")
-            total = fields.get("total", "?")
-            return [self._styled(f"  {noun} {current}/{total} · {name}", "running")]
-        if event in {"phase_end", "stage_end"}:
-            label = terminal_text(
-                fields.get("label") or fields.get("phase_name") or fields.get("stage")
-            )
-            status = terminal_text(fields.get("status", "completed"))
-            outcome = terminal_text(str(fields.get("outcome", "")).replace("_", " "))
-            elapsed = fields.get("elapsed")
-            suffix = f" · {outcome}" if outcome else ""
-            if elapsed:
-                suffix += f" · {elapsed}"
-            semantic = (
-                "success"
-                if status in {"completed", "passed", "success"}
-                and outcome != "not qualified"
-                else "warning"
-                if status in {"degraded", "skipped"} or outcome == "not qualified"
-                else "failure"
-            )
-            return [self._styled(f"{label} · {status}{suffix}", semantic)]
-        if event == "review_result":
-            return [self._styled(format_review_result(fields), "detail")]
-        if event == "revision_result":
-            return [self._styled(format_revision_review(fields), "detail")]
-        if event == "variant_result":
-            return self._item_result(
-                fields, noun="Variant", count_key="eval_count", count_label="evals"
-            )
-        if event == "analysis_result":
-            return self._item_result(
-                fields,
-                noun="Analysis",
-                count_key="attempt_count",
-                count_label="attempts",
-            )
-        if event in {"variants_summary", "analyses_summary"}:
-            noun = "Variants" if event == "variants_summary" else "Analyses"
-            return [
-                self._styled(
-                    f"{noun} · "
-                    f"{fields.get('passed', 0)}/{fields.get('total', 0)} passed · "
-                    f"{fields.get('failed', 0)} failed · {fields.get('timeout', 0)} timed out",
-                    "success" if fields.get("failed", 0) == 0 else "warning",
-                )
-            ]
-        if event == "pipeline_summary":
-            status = fields.get("status", "completed")
-            return [
-                self._styled(
-                    "Analyses · "
-                    f"{fields.get('rubric_passed_count', 0)}/"
-                    f"{fields.get('analysis_count', 0)} passed rubric · "
-                    f"{fields.get('selected_count', 0)} selected",
-                    "success" if status == "completed" else "warning",
-                )
-            ]
-        if event == "paper_gate":
-            if is_paper_heartbeat(fields.get("state"), fields):
-                return []
-            gate = paper_gate_name(fields.get("gate", "paper"))
-            qualifier = paper_gate_qualifier(fields)
-            state = terminal_text(fields.get("state", "started"))
-            if state == "started" and self.transient_progress:
-                return []
-            glyph = {"started": "⠋", "completed": "✓", "failed": "✗", "skipped": "–"}.get(
-                state,
-                "·",
-            )
-            semantic = {
-                "started": "running",
-                "completed": "success",
-                "failed": "failure",
-                "skipped": "detail",
-            }.get(state, "detail")
-            line = f"[PAPER] {glyph} {gate} · {state}"
-            if qualifier:
-                line = f"{line} ({qualifier})"
-            if state in {"completed", "failed"} and fields.get("elapsed"):
-                line = f"{line} · {terminal_text(fields['elapsed'])}"
-            return [self._styled(line, semantic)]
-        if event == "pipeline_end":
-            status = terminal_text(fields.get("status", "completed"))
-            outcome = terminal_text(str(fields.get("outcome", "")).replace("_", " "))
-            elapsed = fields.get("elapsed")
-            suffix = f" · {outcome}" if outcome else ""
-            if elapsed:
-                suffix += f" · {elapsed}"
-            semantic = (
-                "warning"
-                if outcome == "not qualified" or status == "completed_degraded"
-                else "success"
-                if status == "completed"
-                else "failure"
-            )
-            return ["", self._styled(f"Pipeline finished · {status}{suffix}", semantic)]
-        return None
-
     def _logo(self) -> list[str]:
         return render_logo(
             colors=self.colors_enabled,
             columns=_terminal_columns(self.stream),
         )
-
-    def _item_result(
-        self,
-        fields: dict[str, Any],
-        *,
-        noun: str,
-        count_key: str,
-        count_label: str,
-    ) -> list[str]:
-        name = terminal_text(
-            fields.get("title") or fields.get("name") or fields.get("id") or "unknown"
-        )
-        status = terminal_text(fields.get("status", "unknown"))
-        passed = fields.get("rubric_passed") is True
-        rubric = "PASS" if passed else "FAIL"
-        count = fields.get(count_key, 0)
-        semantic = "success" if passed and status == "completed" else "failure"
-        return [
-            self._styled(
-                f"  {noun}: {name} · {status} · {count} {count_label} · rubric {rubric}",
-                semantic,
-            )
-        ]
 
     def _styled(self, text: str, semantic: str) -> str:
         return style(text, semantic, enabled=self.colors_enabled)
@@ -411,9 +195,6 @@ class HumanRenderer:
         model = fields.get("agent.model")
         reasoning_effort = fields.get("agent.reasoning_effort")
         evaluations = fields.get("execution.max_program_evals_per_attempt", "?")
-        workers = fields.get("execution.workers", 1)
-        runtime = "Docker" if fields.get("container.enabled") else "native"
-        worker_label = "worker" if workers == 1 else "workers"
         agent_line = f"Agent: {terminal_text(agent)}"
         if model not in (None, "none"):
             agent_line += f" / {terminal_text(model)}"
@@ -422,7 +203,7 @@ class HumanRenderer:
         lines = [
             f"Agentic Scientist · {terminal_text(task_dir.name)} · {cycles} cycles",
             agent_line,
-            f"Config: {evaluations} evaluations/idea · {workers} {worker_label} · {runtime}",
+            f"Config: {evaluations} evaluations/idea",
             f"Results: {terminal_text(fields.get('paths.results_dir', self.results_dir))}",
         ]
         return lines
@@ -436,7 +217,7 @@ class HumanRenderer:
         return self._verbose_event("step_start", fields) if self.verbose else []
 
     def _step_end(self, fields: dict[str, Any]) -> list[str]:
-        if fields.get("step") not in {"idea_generation", "task_draft", "paper_generation"}:
+        if fields.get("step") != "idea_generation":
             return []
         status = "done" if fields.get("exit", 0) == 0 else f"failed (exit {fields.get('exit')})"
         semantic = "success" if fields.get("exit", 0) == 0 else "failure"

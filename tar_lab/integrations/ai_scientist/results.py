@@ -1,34 +1,31 @@
-"""Summarize an engine run directory (the AI-Scientist-v3 output contract)."""
+"""Summarize an engine run directory.
+
+The investigation loop writes its own event journal (``events.jsonl``: ``finished`` or
+``campaign_failed``, ``cost_summary``) and ``best_program_manifest.json``. Runs of the
+upstream pipeline keep those files under ``investigation/``.
+"""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
 @dataclass(frozen=True)
-class PhaseResult:
-    name: str
-    status: str
-    return_code: int | None
-    outcome: str | None = None
-
-
-@dataclass(frozen=True)
 class RunSummary:
     run_dir: Path
+    investigation_dir: Path
     status: str | None
-    """Final ``pipeline_end`` status of the latest session (``completed``, ``failed``, ...)."""
-    phases: dict[str, PhaseResult] = field(default_factory=dict)
+    """``completed`` (the campaign finished), ``failed``, or ``None`` (still running/killed)."""
     best_program: dict[str, Any] | None = None
-    investigation_outcome: str | None = None
-    paper_pdf: Path | None = None
+    outcome: str | None = None
+    """``winner`` when an idea beat the baseline program, ``no_winner`` otherwise."""
     estimated_cost_usd: float | None = None
     wall_seconds: float | None = None
-    """Sum of ``pipeline_start`` → ``pipeline_end`` spans over all sessions of the run."""
+    cycles_completed: int | None = None
 
     @property
     def completed(self) -> bool:
@@ -59,54 +56,40 @@ def _events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
-def load_run(run_dir: Path) -> RunSummary:
-    """Read engine artifacts; missing files yield ``None`` fields rather than errors.
-
-    Later events win, so resumed runs report each phase's most recent result.
-    """
-    run_dir = Path(run_dir)
-    status: str | None = None
-    phases: dict[str, PhaseResult] = {}
-    cost: float | None = None
-    wall: float | None = None
-    started: datetime | None = None
-    for event in _events(run_dir / "pipeline_events.jsonl"):
-        fields = event.get("fields") or {}
-        kind = event.get("event")
-        ts = _timestamp(event)
-        if kind == "pipeline_start":
-            started = ts
-        elif kind == "pipeline_end" and started is not None and ts is not None:
-            wall = (wall or 0.0) + (ts - started).total_seconds()
-            started = None
-        if kind == "phase_end" and fields.get("phase_name"):
-            name = str(fields["phase_name"])
-            phases[name] = PhaseResult(
-                name, str(fields.get("status")), fields.get("return_code"), fields.get("outcome")
-            )
-        elif kind == "pipeline_end":
-            status = fields.get("status")
-        elif kind == "cost_summary" and fields.get("run_total_cost_usd") is not None:
-            try:
-                cost = float(fields["run_total_cost_usd"])
-            except (TypeError, ValueError):
-                pass
-    completion = _read_json(run_dir / ".investigation_completion.json") or {}
-    pdf = run_dir / "paper" / "paper.pdf"
-    return RunSummary(
-        run_dir=run_dir,
-        status=status,
-        phases=phases,
-        best_program=_read_json(run_dir / "investigation" / "best_program_manifest.json"),
-        investigation_outcome=completion.get("outcome"),
-        paper_pdf=pdf if pdf.is_file() else None,
-        estimated_cost_usd=cost,
-        wall_seconds=wall,
-    )
-
-
 def _timestamp(event: dict[str, Any]) -> datetime | None:
     try:
         return datetime.fromisoformat(str(event["timestamp"]))
     except (KeyError, ValueError):
         return None
+
+
+def load_run(run_dir: Path) -> RunSummary:
+    """Read engine artifacts; missing files yield ``None`` fields rather than errors."""
+    run_dir = Path(run_dir)
+    nested = run_dir / "investigation"
+    inv = nested if (nested / "events.jsonl").exists() else run_dir
+    status: str | None = None
+    cost: float | None = None
+    cycles: int | None = None
+    events = _events(inv / "events.jsonl")
+    for event in events:
+        fields = event.get("fields") or {}
+        kind = event.get("event")
+        if kind == "finished":
+            status = "completed"
+            cycles = fields.get("cycles_completed")
+        elif kind == "campaign_failed":
+            status = "failed"
+        elif kind == "cost_summary" and fields.get("run_total_cost_usd") is not None:
+            try:
+                cost = float(fields["run_total_cost_usd"])
+            except (TypeError, ValueError):
+                pass
+    stamps = [t for t in map(_timestamp, events) if t is not None]
+    wall = (stamps[-1] - stamps[0]).total_seconds() if len(stamps) > 1 else None
+    best = _read_json(inv / "best_program_manifest.json")
+    outcome = None
+    if status == "completed":
+        outcome = "no_winner" if not best or best.get("source_attempt_id") == "bootstrap" \
+            else "winner"
+    return RunSummary(run_dir, inv, status, best, outcome, cost, wall, cycles)

@@ -8,7 +8,7 @@ Keep durable run memory so idea evolution and program evidence are never lost be
 
 # When to use the skill
 - At run start to initialize memory.
-- After every meaningful step (`idea`, `edit`, `evaluate`, `verify`, `paper`, `draft`).
+- After every meaningful step (`idea`, `edit`, `evaluate`, `verify`).
 - Immediately after every `evaluate-program -> verify-rubrics` pair.
 
 # What to do
@@ -51,8 +51,8 @@ python "${MEMORY_HELPER}" \
 ```
 9. JSONL event schema (required keys):
 - `timestamp` (auto-filled if omitted)
-- `step` (`idea|edit|evaluate|verify|paper|draft|final|conclusions_skip`)
-- `scope` (`idea|attempt|paper|campaign`)
+- `step` (`idea|edit|evaluate|verify|final|conclusions_skip`)
+- `scope` (`idea|attempt|campaign`)
 - `summary`
 - `evidence`
 - `next_action`
@@ -61,7 +61,7 @@ python "${MEMORY_HELPER}" \
 10. Update distilled conclusions (`conclusions.md`).
 **Purpose.** `conclusions.md` is a *forward-looking guide* for the next worker (or your future self in a later cycle). Its job is to help readers (a) focus their effort on directions you've found promising, and (b) avoid spending compute on directions you've already shown to be unpromising. Each sentence should either point at a lead worth pursuing or warn against a dead end, framed so a researcher who has not read your `memory.md` can still act on it. Avoid chronology, restate-of-results, and post-mortem narration — those belong in `memory.md`. Conclusions are the synthesis layer that makes other workers' next cycles more efficient.
 
-**When.** After every memory-append in the cycle (idea / edit / evaluate / verify / paper / final), evaluate whether `conclusions.md` should be updated.
+**When.** After every memory-append in the cycle (idea / edit / evaluate / verify / final), evaluate whether `conclusions.md` should be updated.
 
 **Update gate (the only valid triggers).**
 - (a) cycle **contradicts** an existing sentence → rewrite that sentence.

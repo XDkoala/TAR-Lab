@@ -48,21 +48,6 @@ actual content.
 - use stable snake_case rubric ids
 - keep rubric descriptions concrete and measurable
 6. Ensure `{{TARGET_RUBRICS_FILE}}` is exactly equal to `idea_bundle.json.target_rubrics`.
-7. Apply the active harness rules exactly:
-
-{{HARNESS_RUBRIC_REQUIREMENTS}}
-
-When a rubric includes `verification`, `verification` must be a JSON object, never a prose string.
-For harness implementation rubrics, use exactly this shape:
-
-```json
-{
-  "verification": {
-    "type": "source_contains",
-    "patterns": ["specific executable snippet"]
-  }
-}
-```
-
-8. Before finishing, reread both files and confirm every implementation rubric satisfies the active harness rules.
+7. Omit `verification` from every rubric; static source verification is not used.
+8. Before finishing, reread both files and confirm they are consistent.
 9. Do not modify files outside the required output files.

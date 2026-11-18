@@ -22,7 +22,7 @@ from .core.ledger import Ledger, OrderState
 from .core.machine import describe
 from .core.workorder import Executor, Limits, McpServer, WorkOrder
 from .integrations.ai_scientist import AIScientistEngine, AIScientistExecutor, load_run
-from .integrations.cli_agents.codex import CodexExecutor
+from .integrations.cli_agents.codex import CodexExecutor, find_codex
 from .integrations.cli_agents.devin import DevinExecutor
 from .integrations.undermind import (
     FileTokenStorage,
@@ -118,34 +118,29 @@ def _engine_summary(run_dir: Path) -> int:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _engine(name: str) -> AIScientistEngine:
+def _engine(name: str, *, pipeline: bool = False) -> AIScientistEngine:
+    """The engines run natively: agents launch through a locally built headless CLI
+    (``.tools/headless``) and find ``codex`` on ``PATH``."""
     workspace = REPO_ROOT.parent
     runs = Path(os.environ.get("TARLAB_RUNS_DIR") or workspace / "runs")
-    return AIScientistEngine(REPO_ROOT / "engines" / name, runs, workspace / ".tools" / "node")
-
-
-def _engine_overrides() -> dict[str, str | int | float | bool]:
-    """How engine work orders run unless the order says otherwise: Codex on the subscription
-    inside the engine's Docker image (the setup used for the Project A baseline). Docker has
-    no GPU runtime here, so engine orders evaluate on the CPU."""
-    env_file = REPO_ROOT / "deploy" / "local" / "env" / "codex-subscription.env"
-    overrides: dict[str, str | int | float | bool] = {
-        "agent.reasoning_effort": "medium", "container.enabled": True,
-        "container.image": os.environ.get("TARLAB_ENGINE_IMAGE",
-                                          "agentic-scientist/agent-cli:codex-0.169.0")}
-    if env_file.is_file():
-        overrides["container.env_file"] = str(env_file)
-    return overrides
+    headless = workspace / ".tools" / "headless" / "dist" / "cli.js"
+    try:
+        tools = {"codex": Path(find_codex())}
+    except FileNotFoundError:
+        tools = {}
+    return AIScientistEngine(REPO_ROOT / "engines" / name, runs, workspace / ".tools" / "node",
+                             headless if headless.is_file() else None, tools, pipeline)
 
 
 def _executors() -> dict[str, Executor]:
+    codex = CodexExecutor()
     return {
-        "codex": CodexExecutor(),
+        "codex": codex,
         "devin": DevinExecutor(),
-        "ai-scientist": AIScientistExecutor(_engine("ai-scientist-v3"), model=CodexExecutor().model,
-                                            overrides=_engine_overrides()),
+        "ai-scientist": AIScientistExecutor(_engine("ai-scientist-v3"), model=codex.model),
         "ai-scientist-original": AIScientistExecutor(
-            _engine("ai-scientist-v3-original"), name="ai-scientist-original"),
+            _engine("ai-scientist-v3-original", pipeline=True), name="ai-scientist-original",
+            model=codex.model),
     }
 
 
@@ -513,7 +508,7 @@ def build_parser() -> argparse.ArgumentParser:
                             ("pause", "pause after the current work order"),
                             ("stop", "stop the running work order now and pause")):
         groups.add_parser(name, help=help_text).add_argument("project", type=Path)
-    tex = groups.add_parser("tex", help="LaTeX builds in Docker").add_subparsers(
+    tex = groups.add_parser("tex", help="LaTeX builds (Tectonic on the host)").add_subparsers(
         dest="command", required=True)
     tex_build = tex.add_parser("build", help="compile a paper directory to PDF")
     tex_build.add_argument("paper_dir", type=Path)

@@ -17,8 +17,7 @@ PROTOCOL = f"{FINAL_DIR}/protocol.md"
 FROZEN = f"{FINAL_DIR}/frozen.txt"
 RESULTS_DIR = "results/final"
 SKIP_DIRS = frozenset({".git", ".venv", "venv", ".cache", "__pycache__", "node_modules",
-                       ".mypy_cache", ".pytest_cache", ".ruff_cache", ".ipynb_checkpoints",
-                       ".agent_home"})
+                       ".mypy_cache", ".pytest_cache", ".ruff_cache", ".ipynb_checkpoints"})
 
 
 def frozen_entries(workspace: Path) -> list[str]:

@@ -311,8 +311,7 @@ def test_snapshot_skips_environments_caches_and_large_files(tmp_path: Path) -> N
     (ws / "code").mkdir()
     (ws / "code" / "run.py").write_text("print(1)\n")
     (ws / "weird name #1.txt").write_text("small\n")
-    for d in (".venv/lib", ".cache/uv", "code/__pycache__",
-              "engine_runs/t/codex/r1/investigation/.agent_home/.codex"):
+    for d in (".venv/lib", ".cache/uv", "code/__pycache__"):
         (ws / d).mkdir(parents=True)
         (ws / d / "f.bin").write_bytes(b"x" * 100)
     big = ws / "assets" / "data [v1].h5"
@@ -332,8 +331,7 @@ def test_snapshot_skips_environments_caches_and_large_files(tmp_path: Path) -> N
     assert big.exists() and grows.exists()  # skipped, never deleted
     started = next(e for e in kernel.ledger.events("wo-1") if e.kind == "order.started")
     excluded = started.payload["snapshot_excluded"]
-    assert excluded["dirs"] == [".cache", ".venv", "code/__pycache__",
-                                "engine_runs/t/codex/r1/investigation/.agent_home"]
+    assert excluded["dirs"] == [".cache", ".venv", "code/__pycache__"]
     assert excluded["large_files"] == 2 and {f["path"] for f in excluded["largest"]} == {
         "assets/data [v1].h5", "results/log.txt"}
 

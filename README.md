@@ -2,7 +2,7 @@
 
 TAR-Lab（Trusted Autonomous Research Lab）的目标是做成一个全自动科研平台：由多个 Agent 协作完成选题、文献调研、实验、分析和写作，并且能自我修复、自我迭代。关键节点保留人工审批。
 
-[SakanaAI/AI-Scientist-v3](https://github.com/SakanaAI/AI-Scientist-v3)（Apache-2.0）作为平台的实验执行引擎，放在 `engines/ai-scientist-v3/`。架构设计见 [docs/architecture.md](docs/architecture.md)。
+[SakanaAI/AI-Scientist-v3](https://github.com/SakanaAI/AI-Scientist-v3)（Apache-2.0）的“想法搜索”循环作为平台的一个实验引擎，放在 `engines/ai-scientist-v3/`：只保留这一部分，在本机原生运行（不用 Docker），其余阶段已删除。未改动的上游原版放在 `engines/ai-scientist-v3-original/`，只用于基线对比。架构设计见 [docs/architecture.md](docs/architecture.md)。
 
 ## 仓库结构
 
@@ -10,10 +10,11 @@ TAR-Lab（Trusted Autonomous Research Lab）的目标是做成一个全自动科
 | --- | --- |
 | `tar_lab/` | 平台本体：领域模型、多 Agent、编排、工具/MCP、外部集成、自修复、记忆 |
 | `tests/` | 平台测试 |
-| `engines/ai-scientist-v3/` | AI-Scientist-v3 引擎（独立的 Python 环境、测试和 CI） |
-| `deploy/local/` | 本地启动脚本、Docker 扩展镜像、环境配置模板，见 [deploy/local/README.zh.md](deploy/local/README.zh.md) |
+| `engines/ai-scientist-v3/` | 精简后的 AI-Scientist-v3 想法搜索引擎（独立的 Python 环境和测试） |
+| `engines/ai-scientist-v3-original/` | 上游原版，保持与上游逐字节一致，只用于基线对比 |
+| `deploy/` | 邮件通知配置模板、Undermind OAuth 元数据 |
 | `docs/` | 架构设计、缺陷修复记录、维护记录 |
-| `patches/ai-scientist-v3/` | 对引擎上游代码的修改登记，便于给上游提 PR |
+| `patches/ai-scientist-v3/` | 引擎精简的说明（已不再与上游同步） |
 
 ## 本地工作区布局
 
@@ -22,7 +23,7 @@ Trusted-Autonomous-Research-Lab/
 ├── TAR-Lab/        本仓库
 ├── runs/           实验运行结果（不进 Git）
 ├── deliverables/   交付快照（论文、报告、图表）
-└── .tools/         本地工具：node/、gh/
+└── .tools/         本地工具：node/、gh/、headless/（引擎启动 Agent 用）、tectonic/（编译论文）
 ```
 
 ## 开发
@@ -32,12 +33,16 @@ uv sync                                               # 平台环境（仓库根
 uv run ruff check . && uv run mypy . && uv run pytest -q
 
 cd engines/ai-scientist-v3 && uv sync --frozen        # 引擎环境（独立 .venv）
-uv run ruff check . && uv run mypy . && uv run pytest -q -n auto
+uv run ruff check . && uv run mypy src tests && uv run pytest -q -n auto
 ```
+
+本地工具（都在 `../.tools/`，不需要 sudo）：
+- `headless/`：引擎用它启动 Codex 等 Agent。安装：`git clone https://github.com/RobertTLange/headless-cli.git headless && git -C headless checkout 93cd9b06b85f848af1308c41e018991b33907c5e && cd headless && npm ci --ignore-scripts && npm run build && npm prune --omit=dev`（用 `.tools/node` 里的 Node）。
+- `tectonic/bin/tectonic`：编译论文 PDF，Tectonic 0.17.0（`tectonic-0.17.0-x86_64-unknown-linux-gnu.tar.gz`，SHA-256 `1a715688baf591e650c8aeb160ae934e181685eecbb38b317de30b269ac5d606`）。第一次编译会自动下载用到的 LaTeX 宏包，之后走缓存。也可以改用本机 TeX Live（`pdflatex`），或用 `TARLAB_TECTONIC` 指定路径。
 
 平台和引擎使用各自独立的环境。平台通过命令行和运行目录里的文件调用引擎，不导入引擎的 Python 代码。
 
-凭据不入库：`.env`、`engines/ai-scientist-v3/.env`、`deploy/local/env/*.env` 都已被 Git 忽略，只提交 `*.env.example` 模板。
+凭据不入库：`.env`、`engines/ai-scientist-v3/.env`、`deploy/local/env/*.env` 都已被 Git 忽略，只提交 `*.env.example` 模板。引擎里的 Agent 用你本机已登录的 Codex 订阅（`HEADLESS_BILLING=subscription`），不用 API 密钥。
 
 ## 交互界面
 
@@ -79,7 +84,7 @@ tarlab status projects/<项目> --json
 - **预算**：花费按 API 标价估算（订阅不另外扣钱）。花到 80% 发邮件提醒；花到 100% 新工单暂停，正在跑的工单跑完，同时问你要不要追加。回答里写一个更高的金额（如“追加到 $45”）就直接生效。
 - **并行**：最多同时跑 3 张工单；工程师工单可能占用 GPU，一次只跑一张。
 - **快照**：每张工单开始前给工作区做 git 快照。克隆进工作区的仓库，记录来源、提交号和本地改动的补丁（`workspace/.tar-lab/nested/`）。
-- **AI-Scientist-v3 引擎**：子问题有自动打分、值得反复搜索改进时（方法变体、结构或超参数搜索、在基准上超过基线），主 Agent 可以派“引擎工单”。先由工程师在工作区里建好引擎任务目录（`task.md`、`evaluate.py`、`program_0/`），平台检查完整后才放行。引擎在 Docker 里跑、只用 CPU（本机 Docker 没有 GPU 运行时），结果放在 `workspace/engine_runs/`，大约每 10 分钟跑一个想法。镜像可用 `TARLAB_ENGINE_IMAGE` 指定。
+- **AI-Scientist-v3 引擎**：子问题有自动打分、值得反复搜索改进时（方法变体、结构或超参数搜索、在基准上超过基线），主 Agent 可以派“引擎工单”。先由工程师在工作区里建好引擎任务目录（`task.md`、`evaluate.py`、`capture.py`、`program_0/`，以及任务自己的 `.venv`），平台检查完整后才放行。引擎在本机原生运行，候选程序用任务的 `.venv` 评估，可以用 GPU；结果放在 `workspace/engine_runs/`，大约每 10 分钟跑一个想法。
 - **封存的最终评估**：实验方案一开始就定好留出数据和评估协议，开发、调参、选模型时都不碰。候选方法定下来后，工程师写好 `eval/final/protocol.md`、评估脚本和 `eval/final/frozen.txt`（要评估的代码、配置和权重），主 Agent 再派最终评估工单。平台在派单时给这些文件算指纹，工单结束后再核对一遍，记录写进 `results/final/<工单号>/SEAL.json`，有改动就通知你。论文里的主要结果只能来自这里。再跑一次最终评估要经过你同意，并在论文里披露。
 - **额度用完**：某个执行者报额度不足或限流时，它的工单暂停 30 分钟后自动重试，主 Agent 也一样。设置 `TARLAB_FALLBACK=codex=devin` 后，工单会改由备用执行者接着做。默认不开启，因为 Devin 超出套餐额度后按 API 价格另外收费，而且平台目前估算不了 Devin 的花费。
 
@@ -93,15 +98,6 @@ uv run tarlab undermind call <tool> --args '{"key": "value"}'
 uv run tarlab engine summary ../runs/circpack/codex/20261116_143042   # 汇总一次引擎运行
 ```
 
-## 同步引擎上游
+## 引擎与上游
 
-`upstream-main` 分支跟踪 SakanaAI 上游 `upstream/main`，代码位于仓库根目录；本仓库中对应代码位于 `engines/ai-scientist-v3/`。
-
-```bash
-git fetch upstream && git branch -f upstream-main upstream/main
-git log --oneline upstream-main ^main                  # 查看上游新提交
-git cherry-pick -X subtree=engines/ai-scientist-v3 <commit>    # 挑选单个提交
-git merge -X subtree=engines/ai-scientist-v3 upstream-main     # 或整体合并
-```
-
-修改引擎代码时，单独提交，并登记到 `patches/ai-scientist-v3/README.md` 和 `docs/system_defects_and_remediation_log.md`。
+`engines/ai-scientist-v3/` 只保留了上游的想法搜索循环（investigation），任务起草、消融、上游自带的最终评估、事后分析、写论文、外部评审、网页查看器、容器支持和并行 worker 都已删除，所以不再从上游合并更新。删了什么、为什么删，见 [patches/ai-scientist-v3/README.md](patches/ai-scientist-v3/README.md)。需要和上游完整流程对比时，用 `engines/ai-scientist-v3-original/`（工单执行者 `ai-scientist-original`，同样原生运行）。

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LOCAL_SSD = Path("/mnt/localssd")
-_INHERITED_NAMES = ("AGENTIC_TEMP_DIR", "AGENTIC_CACHE_ROOT", "AGENTIC_CONTAINER_TEMP_ROOT")
+_INHERITED_NAMES = ("AGENTIC_TEMP_DIR", "AGENTIC_CACHE_ROOT")
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
@@ -21,7 +21,6 @@ class TempStorage:
     base: Path
     temporary: Path
     cache: Path
-    containers: Path
 
 
 def _absolute_path(value: str) -> Path:
@@ -124,7 +123,6 @@ def _create_storage(base: Path) -> TempStorage:
     paths = (
         namespace / "temp" / invocation,
         namespace / "cache",
-        namespace / "containers" / invocation,
     )
     base_fd = _open_base(base)
     try:
@@ -152,7 +150,7 @@ def _inherited_storage() -> TempStorage | None:
     if not all(name in os.environ for name in ("AGENTIC_TEMP_ROOT", *_INHERITED_NAMES)):
         raise ValueError("incomplete inherited temporary storage configuration")
     base = _absolute_path(os.environ["AGENTIC_TEMP_ROOT"])
-    temporary, cache, containers = (
+    temporary, cache = (
         _absolute_path(os.environ[name]) for name in _INHERITED_NAMES
     )
     namespace = _namespace(base)
@@ -160,13 +158,12 @@ def _inherited_storage() -> TempStorage | None:
     if (
         temporary.parent != namespace / "temp"
         or cache != namespace / "cache"
-        or containers != namespace / "containers" / invocation
         or not invocation.startswith("run-")
         or len(invocation) != 36
         or any(char not in "0123456789abcdef" for char in invocation[4:])
     ):
         raise ValueError("invalid inherited temporary storage namespace")
-    for path in (temporary, cache, containers):
+    for path in (temporary, cache):
         _validate_base(path)
         directories: tuple[Path, ...] = (namespace, path)
         if path != cache:
@@ -177,7 +174,7 @@ def _inherited_storage() -> TempStorage | None:
                 raise ValueError(
                     "inherited temporary storage must be private and owned by current user"
                 )
-    return TempStorage(base, temporary, cache, containers)
+    return TempStorage(base, temporary, cache)
 
 
 def _export(storage: TempStorage) -> TempStorage:
@@ -185,7 +182,6 @@ def _export(storage: TempStorage) -> TempStorage:
         "AGENTIC_TEMP_ROOT": str(storage.base),
         "AGENTIC_TEMP_DIR": str(storage.temporary),
         "AGENTIC_CACHE_ROOT": str(storage.cache),
-        "AGENTIC_CONTAINER_TEMP_ROOT": str(storage.containers),
         "TMPDIR": str(storage.temporary), "TMP": str(storage.temporary),
         "TEMP": str(storage.temporary),
     })
@@ -228,7 +224,7 @@ def main() -> int:
             f"[temp-storage] base={storage.base} device={storage.base.stat().st_dev} "
             f"free_bytes={shutil.disk_usage(storage.base).free}", file=sys.stderr,
         )
-        print(storage.base, storage.temporary, storage.cache, storage.containers, sep="\n")
+        print(storage.base, storage.temporary, storage.cache, sep="\n")
     except (OSError, ValueError) as error:
         print(f"temporary storage initialization failed: {error}", file=sys.stderr)
         return 1

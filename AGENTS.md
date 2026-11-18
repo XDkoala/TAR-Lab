@@ -7,3 +7,7 @@
   subsystems (e.g. `tar_lab.tui`) lazily.
 - Never modify `engines/ai-scientist-v3-original`; it must stay byte-identical to upstream.
 - New dependencies: versions released at least 7 days ago (`[tool.uv] exclude-newer` enforces this).
+- `engines/ai-scientist-v3` is a trimmed fork (investigation loop only, native, no Docker) and no longer tracks upstream.
+  Its checks: `cd engines/ai-scientist-v3 && env -u PYTHONPATH .venv/bin/ruff check src tests && env -u PYTHONPATH
+  .venv/bin/mypy src tests && env -u PYTHONPATH .venv/bin/pytest -q -n 8 -p no:cacheprovider tests`.
+- Engine agents launch through `../.tools/headless/dist/cli.js`; PDFs build with `../.tools/tectonic/bin/tectonic`.

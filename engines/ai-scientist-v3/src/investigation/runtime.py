@@ -1,14 +1,11 @@
-"""Runtime logging, subprocess, and container lifecycle helpers."""
+"""Runtime logging and subprocess lifecycle helpers."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import math
 import os
 import signal
-import shutil
 import subprocess
 import sys
 import threading
@@ -50,28 +47,6 @@ _EVENT_LOGGER: EventLogger | None = None
 _INHERITED_COST_ROOT = os.environ.get("AGENTIC_COST_ROOT")
 _MANAGED_COST_ROOT: str | None = None
 STANDARD_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-CHECKPOINT_STORED_LOG_FORMAT = "%(asctime)s [CHECKPOINT STORED] %(message)s"
-PIPELINE_STARTED_AT_ENV = "AGENTIC_PIPELINE_STARTED_AT_MONOTONIC"
-
-
-class StandardLogFormatter(logging.Formatter):
-    """Render checkpoint storage notices without diagnostic warning noise."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._standard = logging.Formatter(STANDARD_LOG_FORMAT)
-        self._checkpoint_stored = logging.Formatter(CHECKPOINT_STORED_LOG_FORMAT)
-
-    def format(self, record: logging.LogRecord) -> str:
-        formatter = (
-            self._checkpoint_stored
-            if record.name == "src.investigation.run_checkpoint"
-            and getattr(record, "checkpoint_stored", False)
-            else self._standard
-        )
-        return formatter.format(record)
-
-
 class StandardLogHandler(logging.StreamHandler[Any]):
     """Keep standard diagnostics separate from transient progress output."""
 
@@ -111,7 +86,7 @@ def configure_standard_logging(*, level: int = logging.WARNING) -> None:
             existing.close()
     if not host_terminal_handler:
         handler = StandardLogHandler()
-        handler.setFormatter(StandardLogFormatter())
+        handler.setFormatter(logging.Formatter(STANDARD_LOG_FORMAT))
         root_logger.addHandler(handler)
         root_logger.setLevel(level)
 
@@ -141,8 +116,6 @@ def configure_event_logging(
     os.environ["AGENTIC_COST_ROOT"] = str(cost_root)
     if _EVENT_LOGGER is not None:
         _EVENT_LOGGER.close()
-    if pipeline_started_at is None:
-        pipeline_started_at = _inherited_pipeline_started_at()
     _EVENT_LOGGER = EventLogger(
         log_format=log_format,
         verbose=verbose,
@@ -156,17 +129,6 @@ def configure_event_logging(
         cost_root=cost_root,
         pipeline_started_at=pipeline_started_at,
     )
-
-
-def _inherited_pipeline_started_at() -> float | None:
-    raw_value = os.environ.get(PIPELINE_STARTED_AT_ENV)
-    if raw_value is None:
-        return None
-    try:
-        value = float(raw_value)
-    except ValueError:
-        return None
-    return value if math.isfinite(value) and 0 <= value <= time.monotonic() else None
 
 
 def shutdown_event_logging() -> None:
@@ -408,168 +370,11 @@ def terminate_all_active_processes(
     return terminated_pids
 
 
-def build_container_session_name(*, agent: str, results_dir: Path) -> str:
-    """Build container session name."""
-    digest = hashlib.sha1(str(results_dir).encode("utf-8")).hexdigest()[:12]
-    return f"agentic-{agent}-{digest}"
-
-
-def stop_container_session(
-    name: str,
-    *,
-    log_event_fn: Callable[..., None],
-) -> bool:
-    """Stop container session."""
-    if not name:
-        return False
-    if shutil.which("docker") is None:
-        return False
-    retries_raw = os.environ.get("AGENT_DOCKER_STOP_RETRIES", "3")
-    retry_sleep_raw = os.environ.get("AGENT_DOCKER_STOP_RETRY_SLEEP_SECONDS", "1")
-    try:
-        retries = max(1, int(str(retries_raw).strip()))
-    except ValueError:
-        retries = 3
-    try:
-        retry_sleep = max(0.0, float(str(retry_sleep_raw).strip()))
-    except ValueError:
-        retry_sleep = 1.0
-
-    last_returncode: int | None = None
-    last_stderr = ""
-    for attempt in range(1, retries + 1):
-        try:
-            run = subprocess.run(
-                ["docker", "rm", "-f", name],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except OSError as exc:
-            last_returncode = None
-            last_stderr = str(exc)
-            if attempt < retries:
-                time.sleep(retry_sleep)
-                continue
-            log_event_fn(
-                "container_session_stop_failed",
-                session=name,
-                attempts=attempt,
-                error=last_stderr,
-            )
-            return False
-        except subprocess.TimeoutExpired:
-            last_returncode = None
-            last_stderr = "timeout"
-            if attempt < retries:
-                time.sleep(retry_sleep)
-                continue
-            log_event_fn(
-                "container_session_stop_failed",
-                session=name,
-                attempts=attempt,
-                error=last_stderr,
-            )
-            return False
-
-        stderr_text = (run.stderr or "").strip()
-        last_returncode = run.returncode
-        last_stderr = stderr_text
-        if run.returncode == 0:
-            log_event_fn("container_session_stopped", session=name, attempts=attempt)
-            return True
-        if "No such container" in stderr_text:
-            return False
-        if attempt < retries:
-            time.sleep(retry_sleep)
-
-    log_event_fn(
-        "container_session_stop_failed",
-        session=name,
-        attempts=retries,
-        returncode=last_returncode,
-        stderr=last_stderr,
-    )
-    return False
-
-
-def probe_docker_available() -> tuple[bool, str]:
-    """Probe docker available."""
-    try:
-        run = subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except OSError as exc:
-        return False, str(exc)
-    except subprocess.TimeoutExpired:
-        return False, "timeout"
-
-    if run.returncode == 0:
-        return True, ""
-    detail = (run.stderr or "").strip() or (run.stdout or "").strip() or "docker info failed"
-    return False, detail
-
-
-def docker_image_exists(image: str) -> tuple[bool, str]:
-    """Handle docker image exists logic for this module."""
-    try:
-        run = subprocess.run(
-            ["docker", "image", "inspect", image],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except OSError as exc:
-        return False, str(exc)
-    except subprocess.TimeoutExpired:
-        return False, "timeout"
-
-    if run.returncode == 0:
-        return True, ""
-    detail = (
-        (run.stderr or "").strip()
-        or (run.stdout or "").strip()
-        or f"docker image inspect failed for image={image}"
-    )
-    return False, detail
-
-
-def container_execution_env(
-    *,
-    containerize: bool,
-    container_session_name: str | None,
-    container_mount_root: Path | None,
-    sanitize_ambient_controls: bool = False,
-) -> dict[str, str]:
-    """Handle container execution env logic for this module."""
+def script_environment() -> dict[str, str]:
+    """Environment for wrapper shell scripts: the caller's, with the wrapper interpreter."""
     temporary_directory()
     env = os.environ.copy()
     # Ensure shell scripts invoked by the wrapper use the same interpreter as the wrapper,
     # regardless of the caller's PATH configuration.
     env.setdefault("WRAPPER_PYTHON", sys.executable)
-    if not containerize:
-        return env
-    if sanitize_ambient_controls:
-        blocked_keys = {
-            "AGENT_CONTAINER_SESSION_NAME",
-            "AGENT_CONTAINER_MOUNT_ROOT",
-            "AGENT_CONTAINER_EXTRA_MOUNTS",
-            "AGENT_CONTAINER_MOUNT_DOCKER_SOCK",
-            "AGENT_CONTAINER_PASSTHROUGH_KEYS",
-            "AGENT_CONTAINER_SECRET_PASSTHROUGH_KEYS",
-        }
-        for key in blocked_keys:
-            env.pop(key, None)
-    if container_session_name:
-        env["AGENT_CONTAINER_SESSION_NAME"] = container_session_name
-    if container_mount_root is not None:
-        env["AGENT_CONTAINER_MOUNT_ROOT"] = str(container_mount_root)
-    else:
-        env.pop("AGENT_CONTAINER_MOUNT_ROOT", None)
     return env

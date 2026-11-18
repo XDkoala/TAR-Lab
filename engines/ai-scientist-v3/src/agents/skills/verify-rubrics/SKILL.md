@@ -11,12 +11,7 @@ Check whether the current candidate satisfies task rubrics, not only raw score.
 - Before concluding an iteration is successful.
 
 # Placeholder usage
-In host-driven verification, the harness pre-creates the program-level
-`rubric_status.json`. Preserve that scaffold and fill only each rubric's
-`pass` and `evidence` fields plus `next_recommendation`; the host computes
-identity, metrics, aggregate `overall_pass`, and the workspace mirror.
-
-In a standalone flow where no scaffold exists, resolve the directory containing
+Resolve the directory containing
 this `SKILL.md` and run its `scripts/create_rubric_status_placeholder.py` helper
 with `<working_dir> --program-index IDX --variant-id ID`. Do not assume the
 helper is under the current working directory.

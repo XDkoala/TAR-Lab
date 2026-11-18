@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: bash src/scripts/idea.sh [--agent claude|codex|cursor|opencode|gemini|pi] [--agent-model <name>] [--reasoning-effort low|medium|high|xhigh] [--task-dir <path>] [--results-dir <path>] [--global-memory-dir <path>] [--cycle-index <n>] [--output-dir <path>] [--instruct <path>] [--harness-evaluated-attempt] [--containerize] [--container-image <name>] [--container-network <mode>] [--container-auth-root <path>] [--container-env-file <path>]
+# Usage: bash src/scripts/idea.sh [--agent claude|codex|cursor|opencode|gemini|pi] [--agent-model <name>] [--reasoning-effort low|medium|high|xhigh] [--task-dir <path>] [--results-dir <path>] [--global-memory-dir <path>] [--cycle-index <n>] [--output-dir <path>] [--instruct <path>]
 
 set -euo pipefail
 
@@ -9,111 +9,8 @@ export BASH_MAX_TIMEOUT_MS=7200000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-source "$SCRIPT_DIR/lib/container_agent.sh"
+source "$SCRIPT_DIR/lib/agent.sh"
 source "$SCRIPT_DIR/lib/task_pathing.sh"
-
-IDEA_TASK_SEAL_EMPTY_DIR=""
-IDEA_TASK_SOURCE_SHADOW=""
-IDEA_PRIVATE_TEMP_ROOT=""
-IDEA_PRIVATE_TEMP_ROOT_ID=""
-IDEA_TASK_SEAL_EMPTY_ID=""
-IDEA_TASK_SOURCE_SHADOW_ID=""
-CONTRACTED_CONTAINER_ENV_FILE=""
-SCRIPT_TEMP_ROOT="${TMPDIR:-/tmp}"
-
-cleanup_idea_security_paths() {
-  if [ -n "${IDEA_TASK_SEAL_EMPTY_DIR:-}" ]; then
-    "$PYTHON_BIN" - "$IDEA_TASK_SEAL_EMPTY_DIR" "$IDEA_PRIVATE_TEMP_ROOT" <<'PY' || true
-import os
-import shutil
-import stat
-import hashlib
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-expected_parent = Path(sys.argv[2]).resolve(strict=True)
-try:
-    metadata = path.lstat()
-except FileNotFoundError:
-    raise SystemExit(0)
-if (
-    path.parent == expected_parent
-    and path.name.startswith("agentic-idea-seal-empty-")
-    and stat.S_ISDIR(metadata.st_mode)
-    and metadata.st_uid == os.getuid()
-):
-    shutil.rmtree(path)
-else:
-    raise SystemExit("Refusing to remove unsafe idea seal directory")
-PY
-    IDEA_TASK_SEAL_EMPTY_DIR=""
-  fi
-  if [ -n "${IDEA_TASK_SOURCE_SHADOW:-}" ]; then
-    "$PYTHON_BIN" - "$IDEA_TASK_SOURCE_SHADOW" "$IDEA_PRIVATE_TEMP_ROOT" <<'PY' || true
-import os
-import shutil
-import stat
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-expected_parent = Path(sys.argv[2]).resolve(strict=True)
-try:
-    metadata = path.lstat()
-except FileNotFoundError:
-    raise SystemExit(0)
-if (
-    path.parent == expected_parent
-    and path.name.startswith("agentic-idea-task-source-")
-    and stat.S_ISDIR(metadata.st_mode)
-    and metadata.st_uid == os.getuid()
-):
-    def restore_owner_access(function, failed_path, _error_info):
-        failed = Path(failed_path)
-        failed_metadata = failed.lstat()
-        if stat.S_ISLNK(failed_metadata.st_mode):
-            failed.unlink()
-            return
-        owner_access = stat.S_IRUSR | stat.S_IWUSR
-        if stat.S_ISDIR(failed_metadata.st_mode):
-            owner_access |= stat.S_IXUSR
-        os.chmod(failed, failed_metadata.st_mode | owner_access)
-        function(failed_path)
-
-    shutil.rmtree(path, onerror=restore_owner_access)
-else:
-    raise SystemExit("Refusing to remove unsafe idea task-source shadow")
-PY
-    IDEA_TASK_SOURCE_SHADOW=""
-  fi
-  if [ -n "${CONTRACTED_CONTAINER_ENV_FILE:-}" ]; then
-    "$PYTHON_BIN" - "$CONTRACTED_CONTAINER_ENV_FILE" "$SCRIPT_TEMP_ROOT" "$REPO_ROOT" <<'PY' || true
-import sys
-from pathlib import Path
-
-sys.path.insert(0, sys.argv[3])
-from src.investigation.temp_cleanup import validate_temp_file
-
-path = Path(sys.argv[1])
-if validate_temp_file(path, Path(sys.argv[2]), "agentic-idea-provider-env-"):
-    path.unlink(missing_ok=True)
-PY
-    CONTRACTED_CONTAINER_ENV_FILE=""
-  fi
-}
-
-trap cleanup_idea_security_paths EXIT
-
-private_directory_identity() {
-  "$PYTHON_BIN" - "$1" <<'PY'
-import sys
-from pathlib import Path
-
-metadata = Path(sys.argv[1]).lstat()
-print(f"{metadata.st_dev}:{metadata.st_ino}")
-PY
-}
 
 AGENT_LOG_MAX_BYTES=16777216
 validate_agent_log_max_bytes "$AGENT_LOG_MAX_BYTES" || exit $?
@@ -131,12 +28,6 @@ INSTRUCT_PATH=""
 VALIDATION_FEEDBACK=""
 CYCLE_INDEX=""
 OUTPUT_DIR=""
-CONTAINERIZE=0
-CONTAINER_IMAGE="agentic-scientist/agent-cli:latest"
-CONTAINER_NETWORK="bridge"
-CONTAINER_AUTH_ROOT="$HOME"
-CONTAINER_ENV_FILE=""
-HARNESS_EVALUATED_ATTEMPT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -190,30 +81,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --validation-feedback)
       VALIDATION_FEEDBACK="$2"
-      shift 2
-      ;;
-    --harness-evaluated-attempt|--harness-evaluated-attempts)
-      HARNESS_EVALUATED_ATTEMPT=1
-      shift
-      ;;
-    --containerize)
-      CONTAINERIZE=1
-      shift
-      ;;
-    --container-image)
-      CONTAINER_IMAGE="$2"
-      shift 2
-      ;;
-    --container-network)
-      CONTAINER_NETWORK="$2"
-      shift 2
-      ;;
-    --container-auth-root)
-      CONTAINER_AUTH_ROOT="$2"
-      shift 2
-      ;;
-    --container-env-file)
-      CONTAINER_ENV_FILE="$2"
       shift 2
       ;;
     claude|codex|cursor|opencode|gemini|pi)
@@ -272,21 +139,6 @@ fi
 if [ -n "$OUTPUT_DIR" ] && [[ "$OUTPUT_DIR" != /* ]]; then
   OUTPUT_DIR="$REPO_ROOT/$OUTPUT_DIR"
 fi
-if [[ "$CONTAINER_AUTH_ROOT" == "~"* ]]; then
-  CONTAINER_AUTH_ROOT="${CONTAINER_AUTH_ROOT/#\~/$HOME}"
-fi
-if [ -n "$CONTAINER_AUTH_ROOT" ] && [[ "$CONTAINER_AUTH_ROOT" != /* ]]; then
-  CONTAINER_AUTH_ROOT="$REPO_ROOT/$CONTAINER_AUTH_ROOT"
-fi
-if [[ "$CONTAINER_ENV_FILE" == "~"* ]]; then
-  CONTAINER_ENV_FILE="${CONTAINER_ENV_FILE/#\~/$HOME}"
-fi
-if [ -n "$CONTAINER_ENV_FILE" ] && [[ "$CONTAINER_ENV_FILE" != /* ]]; then
-  CONTAINER_ENV_FILE="$REPO_ROOT/$CONTAINER_ENV_FILE"
-fi
-if [ -z "$CONTAINER_ENV_FILE" ] && [ -f "$REPO_ROOT/.env" ]; then
-  CONTAINER_ENV_FILE="$REPO_ROOT/.env"
-fi
 
 if [ -z "$INSTRUCT_PATH" ]; then
   INSTRUCT_PATH="$REPO_ROOT/src/prompts/idea.md"
@@ -341,168 +193,11 @@ if ! [[ "$CYCLE_INDEX" =~ ^[0-9]+$ ]] || [ "$CYCLE_INDEX" -le 0 ]; then
   echo "--cycle-index must be a positive integer (got: ${CYCLE_INDEX:-<empty>})" >&2
   exit 1
 fi
-if [ "$CONTAINERIZE" -eq 1 ]; then
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "docker is required when --containerize is enabled" >&2
-    exit 1
-  fi
-  if [ ! -d "$CONTAINER_AUTH_ROOT" ]; then
-    echo "Missing container auth root directory: $CONTAINER_AUTH_ROOT" >&2
-    exit 1
-  fi
-  if [ -n "$CONTAINER_ENV_FILE" ] && [ ! -f "$CONTAINER_ENV_FILE" ]; then
-    echo "Missing container env file: $CONTAINER_ENV_FILE" >&2
-    exit 1
-  fi
-fi
-
 mkdir -p "$RESULTS_DIR"
 mkdir -p "$GLOBAL_MEMORY_DIR"
 mkdir -p "$CONCLUSIONS_DIR"
 TASK_SOURCE_DIR="$TASK_DIR"
-CONTRACTED_TASK=0
-if [ -f "$TASK_SOURCE_DIR/task_contract.json" ]; then
-  CONTRACTED_TASK=1
-  if [ "$CONTAINERIZE" -ne 1 ]; then
-    echo "Contracted tasks require container isolation during idea generation" >&2
-    exit 1
-  fi
-  export AGENT_CONTAINER_MOUNT_DOCKER_SOCK=0
-  export AGENT_CONTAINER_SESSION_NAME=""
-  export AGENT_CONTAINER_EXTRA_MOUNTS=""
-  export AGENT_CONTAINER_MOUNT_ROOT=""
-  export AGENT_CONTAINER_WRITABLE_FILE_SOURCE=""
-  export AGENT_CONTAINER_WRITABLE_FILE_RELATIVE=""
-  export AGENT_CONTAINER_TASK_PYTHON=""
-  export AGENT_CONTAINER_PASSTHROUGH_KEYS=""
-  export AGENT_CONTAINER_SECRET_PASSTHROUGH_KEYS=""
-  SEALED_VALUES=()
-  mapfile -d '' -t SEALED_VALUES < <(
-    "$PYTHON_BIN" - "$REPO_ROOT" "$TASK_SOURCE_DIR" <<'PY'
-import hashlib
-import sys
-from pathlib import Path
-
-repo_root = Path(sys.argv[1])
-task_dir = Path(sys.argv[2])
-sys.path.insert(0, str(repo_root))
-
-from src.investigation.task_contract import load_task_contract  # noqa: E402
-
-contract = load_task_contract(task_dir / "task_contract.json")
-for value in (contract.evaluators.final, contract.resources.final_root):
-    sys.stdout.buffer.write(value.encode("ascii") + b"\0")
-contract_sha256 = hashlib.sha256(
-    (task_dir / "task_contract.json").read_bytes()
-).hexdigest()
-sys.stdout.buffer.write(contract_sha256.encode("ascii") + b"\0")
-PY
-  )
-  if [ "${#SEALED_VALUES[@]}" -ne 3 ]; then
-    echo "Invalid sealed artifact declarations" >&2
-    exit 1
-  fi
-  SEALED_FILE_VALUES=(
-    "${SEALED_VALUES[0]}"
-    "task_contract.json"
-    ".agentic_task_validation.json"
-  )
-  if [ -f "$TASK_SOURCE_DIR/manual_validation.json" ]; then
-    SEALED_FILE_VALUES+=("manual_validation.json")
-  fi
-  printf -v AGENT_TASK_SEALED_FILES '%s\n' "${SEALED_FILE_VALUES[@]}"
-  AGENT_TASK_SEALED_FILES="${AGENT_TASK_SEALED_FILES%$'\n'}"
-  export AGENT_TASK_SEALED_FILES
-  export AGENT_TASK_SEALED_DIRS="${SEALED_VALUES[1]}"
-  IDEA_PRIVATE_TEMP_ROOT="$(
-    "$PYTHON_BIN" - \
-      "${AGENTIC_PRIVATE_TMPDIR:-${TMPDIR:-/tmp}}" \
-      "$RESULTS_DIR" \
-      "$TASK_SOURCE_DIR" <<'PY'
-import os
-import stat
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1]).expanduser().resolve(strict=True)
-results = Path(sys.argv[2]).resolve(strict=True)
-task_source = Path(sys.argv[3]).resolve(strict=True)
-if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
-    raise SystemExit(f"Private temporary directory is not writable: {root}")
-if root == results or root.is_relative_to(results):
-    raise SystemExit(f"Private temporary directory is inside writable results: {root}")
-if root == task_source or root.is_relative_to(task_source):
-    raise SystemExit(f"Private temporary directory is inside task source: {root}")
-metadata = root.lstat()
-owner_private = metadata.st_uid == os.getuid() and not (
-    metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-)
-trusted_sticky = metadata.st_uid in {0, os.getuid()} and bool(
-    metadata.st_mode & stat.S_ISVTX
-)
-if not (owner_private or trusted_sticky):
-    raise SystemExit(f"Private temporary directory has unsafe ownership or mode: {root}")
-for ancestor in (root, *root.parents):
-    ancestor_metadata = ancestor.lstat()
-    trusted_owner = ancestor_metadata.st_uid in {0, os.getuid()}
-    writable_by_others = bool(
-        ancestor_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    )
-    sticky = bool(ancestor_metadata.st_mode & stat.S_ISVTX)
-    if not trusted_owner or (writable_by_others and not sticky):
-        raise SystemExit(
-            f"Private temporary directory has an unsafe ancestor: {ancestor}"
-        )
-print(root)
-PY
-  )"
-  IDEA_PRIVATE_TEMP_ROOT_ID="$(private_directory_identity "$IDEA_PRIVATE_TEMP_ROOT")"
-  IDEA_TASK_SEAL_EMPTY_DIR="$(mktemp -d "$IDEA_PRIVATE_TEMP_ROOT/agentic-idea-seal-empty-XXXXXX")"
-  IDEA_TASK_SEAL_EMPTY_ID="$(private_directory_identity "$IDEA_TASK_SEAL_EMPTY_DIR")"
-  AGENT_TASK_SEAL_EMPTY_DIR="$IDEA_TASK_SEAL_EMPTY_DIR"
-  export AGENT_TASK_SEAL_EMPTY_DIR
-fi
 STAGED_TASK_DIR="$(ensure_staged_task_copy "$REPO_ROOT" "$TASK_SOURCE_DIR" "$RESULTS_DIR")"
-if [ "$CONTRACTED_TASK" -eq 1 ]; then
-  IDEA_TASK_SOURCE_SHADOW="$(mktemp -d "$IDEA_PRIVATE_TEMP_ROOT/agentic-idea-task-source-XXXXXX")"
-  "$PYTHON_BIN" "$REPO_ROOT/src/investigation/task_shadow.py" \
-    "$TASK_SOURCE_DIR" \
-    "$IDEA_TASK_SOURCE_SHADOW" \
-    "${SEALED_VALUES[0]}" \
-    "${SEALED_VALUES[1]}" \
-    "${SEALED_VALUES[2]}"
-  IDEA_TASK_SOURCE_SHADOW_ID="$(private_directory_identity "$IDEA_TASK_SOURCE_SHADOW")"
-  AGENT_CONTAINER_EXTRA_MOUNTS="${IDEA_TASK_SOURCE_SHADOW}:/workspace/task:ro"
-  for sealed_file in "${SEALED_FILE_VALUES[@]}"; do
-    validate_task_sealed_relative_path "$sealed_file" || exit 1
-    staged_sealed_path="$IDEA_TASK_SOURCE_SHADOW/$sealed_file"
-    if [ -L "$staged_sealed_path" ]; then
-      echo "Unsafe staged sealed-file symlink: $staged_sealed_path" >&2
-      exit 1
-    fi
-    if [ ! -f "$staged_sealed_path" ]; then
-      echo "Unsafe staged sealed-file path: $staged_sealed_path" >&2
-      exit 1
-    fi
-    AGENT_CONTAINER_EXTRA_MOUNTS+=$'\n'"/dev/null:/workspace/task/${sealed_file}:ro"
-  done
-  staged_final_resources="$IDEA_TASK_SOURCE_SHADOW/${SEALED_VALUES[1]}"
-  if [ -L "$staged_final_resources" ]; then
-    echo "Unsafe staged final-resource symlink: $staged_final_resources" >&2
-    exit 1
-  fi
-  if [ -d "$staged_final_resources" ]; then
-    AGENT_CONTAINER_EXTRA_MOUNTS+=$'\n'"${AGENT_TASK_SEAL_EMPTY_DIR}:/workspace/task/${SEALED_VALUES[1]}:ro"
-  elif [ -e "$staged_final_resources" ]; then
-    echo "Unsafe staged final-resource path: $staged_final_resources" >&2
-    exit 1
-  else
-    echo "Missing staged final-resource directory: $staged_final_resources" >&2
-    exit 1
-  fi
-  TASK_SOURCE_DIR="$IDEA_TASK_SOURCE_SHADOW"
-  export AGENT_CONTAINER_EXTRA_MOUNTS
-fi
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 if [ -z "$OUTPUT_DIR" ]; then
   OUTPUT_DIR="$RESULTS_DIR/_idea_generation/cycle_${CYCLE_INDEX}_${TIMESTAMP}"
@@ -530,7 +225,7 @@ esac
 FORMATTED_SKILLS_REL_DIR="$AGENT_CONFIG_DIR/skills"
 (
   cd "$OUTPUT_DIR"
-  "$PYTHON_BIN" - "$REPO_ROOT" "$FORMATTED_SKILLS_REL_DIR" "$RESULTS_DIR" "$CYCLE_INDEX" "$GLOBAL_MEMORY_DIR" "$CONCLUSIONS_DIR" "$WORKER_INDEX" "$HARNESS_EVALUATED_ATTEMPT" <<'PY'
+  "$PYTHON_BIN" - "$REPO_ROOT" "$FORMATTED_SKILLS_REL_DIR" "$RESULTS_DIR" "$CYCLE_INDEX" "$GLOBAL_MEMORY_DIR" "$CONCLUSIONS_DIR" "$WORKER_INDEX" <<'PY'
 import json
 import shutil
 import sys
@@ -543,7 +238,6 @@ cycle_index = int(sys.argv[4])
 global_memory_dir = Path(sys.argv[5])
 conclusions_dir = Path(sys.argv[6])
 worker_index = int(sys.argv[7])
-harness_evaluated_attempt = sys.argv[8] == "1"
 
 sys.path.insert(0, str(script_dir))
 from src.orchestrator import state as state_store  # noqa: E402
@@ -553,7 +247,7 @@ from src.investigation.skill_scope import (  # noqa: E402
     stage_skill_tree,
     validate_skill_set,
 )
-from src.investigation.harness_feedback import summarize_recent_attempts  # noqa: E402
+from src.investigation.attempt_feedback import summarize_recent_attempts  # noqa: E402
 from src.investigation.files import load_instructions, relative_display_path  # noqa: E402
 
 skills_src = script_dir / "src" / "agents" / "skills"
@@ -673,23 +367,6 @@ extra = {
     "CONCLUSIONS_HISTORY_FILE": relative_display_path(conclusions_history, base_dir=base_dir),
     "OWN_CONCLUSIONS": own_conclusions_text,
     "OTHER_WORKERS_CONCLUSIONS_SECTION": other_workers_conclusions_section,
-    "HARNESS_RUBRIC_REQUIREMENTS": (
-        "Harness mode is enabled. The harness injects a canonical structured "
-        "`combined_score > incumbent` gate from the evaluator-validated baseline/current "
-        "best. Do not invent score thresholds or derived metric expressions; agent-authored "
-        "metric rubrics are replaced. Correctness is already mandatory. Each "
-        "implementation rubric must include `verification` as "
-        "`{\"type\": \"source_contains\", \"patterns\": [\"distinct executable snippet\", ...]}`. "
-        f"Use 1 to 8 specific literal snippets, each at most {MAX_SOURCE_PATTERN_CHARS} characters, "
-        "that the implementation agent will place in "
-        "`program_1/src/**`. Patterns are matched independent of whitespace, quote style, "
-        "and numeric formatting; do not use generic imports, comments, or docstrings as evidence."
-        if harness_evaluated_attempt
-        else (
-            "Harness mode is disabled. Omit `verification` from every rubric; "
-            "static source verification is not used in this mode."
-        )
-    ),
 }
 
 for skill_name in selected_skills:
@@ -706,7 +383,7 @@ PY
 
 PROMPT="$(
   cd "$OUTPUT_DIR"
-  "$PYTHON_BIN" - "$REPO_ROOT" "$INSTRUCT_PATH" "$RESULTS_DIR" "$CYCLE_INDEX" "$GLOBAL_MEMORY_DIR" "$CONCLUSIONS_DIR" "$WORKER_INDEX" "$HARNESS_EVALUATED_ATTEMPT" <<'PY'
+  "$PYTHON_BIN" - "$REPO_ROOT" "$INSTRUCT_PATH" "$RESULTS_DIR" "$CYCLE_INDEX" "$GLOBAL_MEMORY_DIR" "$CONCLUSIONS_DIR" "$WORKER_INDEX" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -718,11 +395,10 @@ cycle_index = int(sys.argv[4])
 global_memory_dir = Path(sys.argv[5])
 conclusions_dir = Path(sys.argv[6])
 worker_index = int(sys.argv[7])
-harness_evaluated_attempt = sys.argv[8] == "1"
 sys.path.insert(0, str(script_dir))
 
 from src.orchestrator import state as state_store
-from src.investigation.harness_feedback import summarize_recent_attempts
+from src.investigation.attempt_feedback import summarize_recent_attempts
 from src.orchestrator.idea_bundle import MAX_SOURCE_PATTERN_CHARS
 from src.investigation.files import load_instructions, relative_display_path
 
@@ -837,23 +513,6 @@ extra = {
     "CONCLUSIONS_HISTORY_FILE": relative_display_path(conclusions_history, base_dir=base_dir),
     "OWN_CONCLUSIONS": own_conclusions_text,
     "OTHER_WORKERS_CONCLUSIONS_SECTION": other_workers_conclusions_section,
-    "HARNESS_RUBRIC_REQUIREMENTS": (
-        "Harness mode is enabled. The harness injects a canonical structured "
-        "`combined_score > incumbent` gate from the evaluator-validated baseline/current "
-        "best. Do not invent score thresholds or derived metric expressions; agent-authored "
-        "metric rubrics are replaced. Correctness is already mandatory. Each "
-        "implementation rubric must include `verification` as "
-        "`{\"type\": \"source_contains\", \"patterns\": [\"distinct executable snippet\", ...]}`. "
-        f"Use 1 to 8 specific literal snippets, each at most {MAX_SOURCE_PATTERN_CHARS} characters, "
-        "that the implementation agent will place in "
-        "`program_1/src/**`. Patterns are matched independent of whitespace, quote style, "
-        "and numeric formatting; do not use generic imports, comments, or docstrings as evidence."
-        if harness_evaluated_attempt
-        else (
-            "Harness mode is disabled. Omit `verification` from every rubric; "
-            "static source verification is not used in this mode."
-        )
-    ),
 }
 
 template = load_instructions(instruct_path, task_dir_display, results_dir_display, extra)
@@ -905,15 +564,10 @@ cleanup_run_processes() {
       "idea:${CYCLE_INDEX}:${TIMESTAMP}:worker-${WORKER_INDEX}" interrupted
   fi
 
-  if [ "$CONTAINERIZE" -eq 1 ] && [ -n "${AGENT_CONTAINER_SESSION_NAME:-}" ]; then
-    stop_container_session_force "$AGENT_CONTAINER_SESSION_NAME" || true
-  fi
-
   if [ -n "${LOG_PIPE:-}" ] && [ -p "$LOG_PIPE" ]; then
     rm -f "$LOG_PIPE"
   fi
   LOG_PIPE=""
-  cleanup_idea_security_paths
 }
 
 on_interrupt() {
@@ -926,17 +580,6 @@ on_interrupt() {
 
 trap on_interrupt INT TERM
 trap cleanup_run_processes EXIT
-
-if [ "$CONTRACTED_TASK" -eq 1 ] \
-  && [ "$CONTAINERIZE" -eq 1 ] \
-  && [ -n "$CONTAINER_ENV_FILE" ]; then
-  CONTRACTED_CONTAINER_ENV_FILE="$(mktemp "$SCRIPT_TEMP_ROOT/agentic-idea-provider-env-XXXXXX")"
-  sanitize_env_file_for_docker \
-    "$CONTAINER_ENV_FILE" "$CONTRACTED_CONTAINER_ENV_FILE" \
-    "$(agent_provider_allowed_env_keys "$AGENT" "$AGENT_MODEL" "$CONTAINER_ENV_FILE")"
-  chmod 600 "$CONTRACTED_CONTAINER_ENV_FILE"
-  CONTAINER_ENV_FILE="$CONTRACTED_CONTAINER_ENV_FILE"
-fi
 
 export CYCLE_INDEX
 export WORKER_INDEX
@@ -958,66 +601,6 @@ fi
 if [ -n "$AGENT_REASONING_EFFORT" ]; then
   echo "Agent reasoning effort override: $AGENT_REASONING_EFFORT"
 fi
-if [ "$CONTAINERIZE" -eq 1 ]; then
-  CONTAINER_HOME_DIR="$(prepare_container_home "$RESULTS_DIR")"
-  seed_auth_into_home "$AGENT" "$CONTAINER_AUTH_ROOT" "$CONTAINER_HOME_DIR"
-  echo "Containerized run: image=$CONTAINER_IMAGE network=$CONTAINER_NETWORK"
-  echo "Container home directory: $CONTAINER_HOME_DIR"
-  if [ -n "${AGENT_CONTAINER_SESSION_NAME:-}" ]; then
-    echo "Container session: ${AGENT_CONTAINER_SESSION_NAME}"
-  fi
-  if [ -n "$CONTAINER_ENV_FILE" ]; then
-    echo "Container env file: $CONTAINER_ENV_FILE"
-  fi
-else
-  CONTAINER_HOME_DIR=""
-fi
-
-if [ "$CONTRACTED_TASK" -eq 1 ]; then
-    "$PYTHON_BIN" - \
-    "$IDEA_PRIVATE_TEMP_ROOT" \
-    "$IDEA_PRIVATE_TEMP_ROOT_ID" \
-    "$IDEA_TASK_SEAL_EMPTY_DIR" \
-    "$IDEA_TASK_SEAL_EMPTY_ID" \
-    "$IDEA_TASK_SOURCE_SHADOW" \
-    "$IDEA_TASK_SOURCE_SHADOW_ID" <<'PY'
-import os
-import stat
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-root_metadata = root.lstat()
-if (
-    stat.S_ISLNK(root_metadata.st_mode)
-    or not stat.S_ISDIR(root_metadata.st_mode)
-    or root_metadata.st_uid not in {0, os.getuid()}
-    or f"{root_metadata.st_dev}:{root_metadata.st_ino}" != sys.argv[2]
-):
-    raise SystemExit(f"Private temporary root changed before launch: {root}")
-
-
-def verify(path_value, expected_identity, *, must_be_empty=False):
-    path = Path(path_value)
-    metadata = path.lstat()
-    identity = f"{metadata.st_dev}:{metadata.st_ino}"
-    if (
-        path.parent != root
-        or stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or identity != expected_identity
-    ):
-        raise SystemExit(f"Private task mount changed before launch: {path}")
-    if must_be_empty and any(path.iterdir()):
-        raise SystemExit(f"Private task seal directory is not empty: {path}")
-
-
-verify(sys.argv[3], sys.argv[4], must_be_empty=True)
-verify(sys.argv[5], sys.argv[6])
-PY
-fi
-
 mkfifo "$LOG_PIPE"
 bounded_agent_log_writer "$PYTHON_BIN" "$LOG_FILE" "$AGENT_LOG_MAX_BYTES" \
   < "$LOG_PIPE" &
@@ -1034,13 +617,7 @@ TEE_PID=$!
     "$PROMPT" \
     "$AGENT_MODEL" \
     "$AGENT_PROFILE" \
-    "$OUTPUT_DIR" \
-    "$CONTAINERIZE" \
-    "$CONTAINER_IMAGE" \
-    "$CONTAINER_NETWORK" \
-    "$CONTAINER_HOME_DIR" \
-    "$CONTAINER_ENV_FILE" \
-    "$RESULTS_DIR"
+    "$OUTPUT_DIR"
 ) > "$LOG_PIPE" 2>&1 &
 AGENT_PID=$!
 
@@ -1080,7 +657,6 @@ if [ -n "${LOG_PIPE:-}" ] && [ -p "$LOG_PIPE" ]; then
   rm -f "$LOG_PIPE"
 fi
 
-cleanup_idea_security_paths
 trap - INT TERM EXIT
 
 if [ "$INTERRUPTED" -eq 1 ]; then
@@ -1089,7 +665,7 @@ fi
 if [ "$AGENT_EXIT_CODE" -ne 0 ]; then
   exit "$AGENT_EXIT_CODE"
 fi
-"$PYTHON_BIN" - "$REPO_ROOT" "$OUTPUT_DIR" "$CYCLE_INDEX" "$GLOBAL_MEMORY_JSONL_FILE" "$HARNESS_EVALUATED_ATTEMPT" <<'PY'
+"$PYTHON_BIN" - "$REPO_ROOT" "$OUTPUT_DIR" "$CYCLE_INDEX" "$GLOBAL_MEMORY_JSONL_FILE" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -1099,7 +675,6 @@ script_dir = Path(sys.argv[1])
 output_dir = Path(sys.argv[2])
 cycle_index = int(sys.argv[3])
 global_memory_jsonl_path = Path(sys.argv[4])
-harness_evaluated_attempt = sys.argv[5] == "1"
 bundle_path = output_dir / "idea_bundle.json"
 rubrics_path = output_dir / "target_rubrics.json"
 
@@ -1132,9 +707,8 @@ try:
 except json.JSONDecodeError as exc:
     raise SystemExit(f"Invalid JSON in {rubrics_path}: {exc}") from exc
 
-if not harness_evaluated_attempt:
-    raw_bundle = without_target_rubric_verification(raw_bundle)
-    raw_rubrics = without_target_rubric_verification(raw_rubrics)
+raw_bundle = without_target_rubric_verification(raw_bundle)
+raw_rubrics = without_target_rubric_verification(raw_rubrics)
 
 try:
     normalized_bundle = normalize_idea_bundle(raw_bundle, cycle_index)

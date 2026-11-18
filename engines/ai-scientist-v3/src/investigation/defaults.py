@@ -26,16 +26,6 @@ def default_idea_instruction_path() -> Path:
     return resolve_path(_repo_root() / "src" / "prompts" / "idea.md")
 
 
-def default_draft_instruction_path() -> Path:
-    """Return default draft instruction path."""
-    return resolve_path(_repo_root() / "src" / "prompts" / "draft_task.md")
-
-
-def default_paper_instruction_path() -> Path:
-    """Return default paper instruction path."""
-    return resolve_path(_repo_root() / "src" / "prompts" / "paper.md")
-
-
 def default_results_path(task_dir: Path, agent: str) -> Path:
     """Return default results path."""
     task_name = task_dir.name.strip() or "task"

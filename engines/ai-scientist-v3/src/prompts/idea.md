@@ -66,8 +66,7 @@ Rules:
 - `target_rubrics.json` must be exactly the same rubric array as `idea_bundle.json.target_rubrics`.
 - Keep rubrics concrete/measurable.
 
-## Harness Rubric Requirements
-{{HARNESS_RUBRIC_REQUIREMENTS}}
+- Omit `verification` from every rubric; static source verification is not used.
 
 # No Execution During Idea Generation
 - Do not run Bash, Shell, Python, `python -c`, `pip`, `evaluate.py`, benchmarks, optimizers, or exploratory computation.

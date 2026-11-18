@@ -74,11 +74,13 @@ GUIDES: dict[str, str] = {
   `engine_tasks/<name>/` with `task.md` (goal, what may change, the score to maximise and its
   constraints), `evaluate.py` (`--program_path <file> --results_dir <dir>`; writes
   `metrics.json` with a numeric `combined_score`, higher is better, and `correct.json` with
-  `correct` and `message`), `program_0/program_spec.toml` with `program_0/src/` holding the
-  baseline program, and a pinned `requirements.txt`. Copy the layout from
-  `{ENGINE_EXAMPLE}`. The evaluator must use development data only, never the held-out
-  final split, and must run on the CPU in a Docker container. Run it on the baseline once
-  and report the score.
+  `correct` and `message`), `capture.py` (copy it unchanged from the example),
+  `program_0/program_spec.toml` with `program_0/src/` holding the baseline program, and a
+  pinned `requirements.txt`. Copy the layout from `{ENGINE_EXAMPLE}`. Create the task's
+  environment in `engine_tasks/<name>/.venv` (`uv venv` + `uv pip install -r
+  requirements.txt`): the engine evaluates every candidate with that interpreter, on this
+  machine, GPU included. The evaluator must use development data only, never the held-out
+  final split. Run it on the baseline once with that interpreter and report the score.
 - Final evaluation: when asked to prepare it, write `eval/final/protocol.md` (what is run,
   on which held-out data, the exact command, the metrics), the evaluation script under
   `eval/final/`, and `eval/final/frozen.txt` (one workspace path per line: the code, configs
@@ -112,8 +114,8 @@ GUIDES: dict[str, str] = {
   scores are labelled as such.
 - Include limitations, compute used, and a statement that the work was produced with an
   automated research system. Build the PDF with:
-  `{sys.executable} -m tar_lab.cli tex build paper` (TeX runs in Docker; read
-  `paper/build.log` on failure).
+  `{sys.executable} -m tar_lab.cli tex build paper` (Tectonic on this machine; missing
+  LaTeX packages are fetched on first use; read `paper/build.log` on failure).
 {_EVIDENCE}""",
     "reviewer": f"""\
 - Topic review: first try to break each candidate. List at least three concrete ways its

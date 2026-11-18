@@ -14,7 +14,7 @@ Run one candidate program with the official evaluator and collect performance an
 1. Execute the evaluator in the current environment:
 
 ```bash
-${TASK_PYTHON:-$WRAPPER_PYTHON} -I -m src.investigation.evaluate_program \
+$WRAPPER_PYTHON -I -m src.investigation.evaluate_program \
     --evaluator {{TASK_DIR}}/evaluate.py \
     --program-dir {{RESULTS_DIR}}/program_<idx> \
     --timeout-seconds "${EVALUATION_TIMEOUT_SECONDS:-21600}"
@@ -42,7 +42,7 @@ Notes:
 
 # Example usage
 ```bash
-${TASK_PYTHON:-$WRAPPER_PYTHON} -I -m src.investigation.evaluate_program \
+$WRAPPER_PYTHON -I -m src.investigation.evaluate_program \
     --evaluator {{TASK_DIR}}/evaluate.py \
     --program-dir {{RESULTS_DIR}}/program_3 \
     --timeout-seconds "${EVALUATION_TIMEOUT_SECONDS:-21600}"

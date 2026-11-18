@@ -53,10 +53,10 @@ For each iteration:
 - The only allowed Python execution is the single official `evaluate.py` command, subject to the evaluation budget.
 
 # Evaluation Runtime
-- Use the task runtime for every official evaluator call so the evaluator and candidate retain the task's installed dependencies:
+- Use this wrapper for every official evaluator call; it runs the evaluator and candidate with the task's own interpreter (`$TASK_PYTHON`), so they keep the task's installed dependencies:
 
 ```bash
-"${TASK_PYTHON:-$WRAPPER_PYTHON}" -I -m src.investigation.evaluate_program \
+"$WRAPPER_PYTHON" -I -m src.investigation.evaluate_program \
     --evaluator "{{TASK_DIR}}/evaluate.py" \
     --program-dir "{{RESULTS_DIR}}/program_<idx>" \
     --timeout-seconds "${EVALUATION_TIMEOUT_SECONDS:-21600}"
@@ -64,8 +64,8 @@ For each iteration:
 
 - Always use this wrapper command; do not invoke `evaluate.py` directly. Evaluator-owned logs and subdirectories stay outside the candidate tree, while validated `metrics.json` and `correct.json` summaries are published at the program root.
 - Do not wrap the command with the shell `timeout` utility. If the shell tool supports an unlimited/omitted timeout, omit its optional timeout. Otherwise, configure it longer than the effective evaluator timeout plus its cleanup margin. Never choose a shell-tool timeout shorter than the evaluator timeout.
-- Never invoke `evaluate.py` with bare `python`, `python3`, or its shebang. The container's wrapper interpreter is intentionally separate from the task runtime and may not contain task dependencies.
-- Candidate code must use only the task runtime's installed dependencies. Never add user-site or absolute `site-packages` paths, and never hard-code paths to the agent home or container filesystem.
+- Never invoke `evaluate.py` with bare `python`, `python3`, or its shebang. The wrapper interpreter is separate from the task runtime and may not contain task dependencies.
+- Candidate code must use only the task runtime's installed dependencies. Never add user-site or absolute `site-packages` paths, and never hard-code paths to the agent home.
 
 # Memory Protocol
 - Continuously update `./memory.md` (create it if missing; append-only, never erase prior entries).

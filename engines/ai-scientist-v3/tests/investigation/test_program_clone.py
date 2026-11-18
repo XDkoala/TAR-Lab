@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from src.investigation.program_clone import clone_program_dir, main
+from src.investigation.program_clone import main
 from src.investigation.program_spec import (
     ProgramSpecError,
     default_program_spec,
@@ -19,7 +17,6 @@ from src.investigation.program_spec import (
     render_default_program_spec_toml,
     resolve_entrypoint,
 )
-from src.investigation.search_runtime import package_search_runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -291,70 +288,6 @@ def test_cli_rejects_unready_cross_attempt_malformed_and_untrusted_sources(tmp_p
 # ---------------------------------------------------------------------------
 
 
-def test_clone_rejects_overlap_and_copies_with_excludes_and_symlinks(tmp_path: Path) -> None:
-    # overlapping source and destination are rejected
-    overlap_src = _write_program_spec(tmp_path / "overlap" / "program_0")
-    for dst_dir in (
-        overlap_src,  # equal
-        overlap_src / "nested",  # destination nested in source
-        tmp_path / "overlap",  # source nested in destination
-    ):
-        with pytest.raises(ValueError, match="overlap"):
-            clone_program_dir(src_dir=overlap_src, dst_dir=dst_dir)
-
-    # non-overridable excludes are respected and symlinks are copied as symlinks
-    src_dir = _write_program(
-        tmp_path / "program_0",
-        _spec_toml(exclude=["src/excluded.txt"], include=["src/excluded.txt", "metrics.json"]),
-    )
-    dst_dir = tmp_path / "program_1"
-    # Excluded but force-included
-    (src_dir / "src" / "excluded.txt").write_text("keep\n", encoding="utf-8")
-    # Pipeline artifacts (non-overridable excludes)
-    for name in (
-        "metrics.json", "correct.json", "rubric_status.json", "stdout.log", "stderr.log",
-        "evaluation_manifest.json", ".evaluation_pending",
-        ".evaluation_stage_abandoned_metrics.json", "harness_evaluate_stdout.log",
-        "harness_evaluate_stderr.log", "_results.json",
-    ):
-        (src_dir / name).write_text("{}", encoding="utf-8")
-    (src_dir / "analysis").mkdir()
-    (src_dir / "analysis" / "run_summary.csv").write_text("stale", encoding="utf-8")
-    (src_dir / ".metaevo_bbob_official").mkdir()
-    (src_dir / ".metaevo_bbob_official" / "output.json").write_text("{}", encoding="utf-8")
-    # Broken symlink inside src/ should still be copied as a symlink.
-    outside = tmp_path / "outside.txt"
-    outside.write_text("outside\n", encoding="utf-8")
-    _symlink("../../outside.txt", src_dir / "src" / "broken_link.txt")
-    outside.unlink()
-
-    _clone(src_dir, dst_dir)
-
-    assert (dst_dir / "src" / "program.py").is_file()
-    assert (dst_dir / "src" / "excluded.txt").is_file()
-    # Non-overridable excludes are never copied, even if included.
-    for name in (
-        "metrics.json", "correct.json", "rubric_status.json", "stdout.log", "stderr.log",
-        "evaluation_manifest.json", ".evaluation_pending", "harness_evaluate_stdout.log",
-        "harness_evaluate_stderr.log", "_results.json", "analysis", ".metaevo_bbob_official",
-    ):
-        assert not (dst_dir / name).exists(), name
-    assert not list(dst_dir.glob(".evaluation_stage_*"))
-    copied_link = dst_dir / "src" / "broken_link.txt"
-    assert copied_link.is_symlink()
-    assert os.readlink(copied_link) == "../../outside.txt"
-
-    # symlinked directories are copied as symlinks
-    src_dir = _write_program(tmp_path / "program_2")
-    dst_dir = tmp_path / "program_3"
-    outside_dir = tmp_path / "outside_dir"
-    outside_dir.mkdir()
-    (outside_dir / "payload.txt").write_text("data\n", encoding="utf-8")
-    _symlink("../../outside_dir", src_dir / "src" / "linked", target_is_directory=True)
-    clone_program_dir(src_dir=src_dir, dst_dir=dst_dir)
-    copied_link_dir = dst_dir / "src" / "linked"
-    assert copied_link_dir.is_symlink()
-    assert os.readlink(copied_link_dir) == "../../outside_dir"
 
 
 # ---------------------------------------------------------------------------
@@ -362,25 +295,3 @@ def test_clone_rejects_overlap_and_copies_with_excludes_and_symlinks(tmp_path: P
 # ---------------------------------------------------------------------------
 
 
-def test_search_runtime_contains_only_generic_control_modules(tmp_path: Path) -> None:
-    package_search_runtime(REPO_ROOT, tmp_path)
-
-    modules = {path.name for path in (tmp_path / "src/investigation").glob("*.py")}
-    launcher = tmp_path / ".search-runtime/bin/python"
-    launcher_text = launcher.read_text(encoding="utf-8")
-
-    assert modules == {
-        "__init__.py", "evaluate_program.py", "evaluation_evidence.py", "files.py",
-        "program_clone.py", "program_spec.py",
-    }
-    assert launcher.stat().st_mode & 0o777 == 0o555
-    assert "contracted task evaluation is harness-owned" in launcher_text
-    assert ".venv" not in launcher_text
-
-    result = subprocess.run(
-        [str(launcher), "-I", "-m", "src.investigation.program_clone", "--help"],
-        capture_output=True, text=True,
-        env=os.environ | {"TASK_SOURCE_DIR": str(tmp_path), "WRAPPER_PYTHON": sys.executable},
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr

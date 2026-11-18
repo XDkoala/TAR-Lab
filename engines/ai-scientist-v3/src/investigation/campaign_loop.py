@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from src.orchestrator import rubrics, state as state_store
 
 logger = logging.getLogger(__name__)
-from .agent_selection import resolve_agent_model, resolve_cycle_agent
+from .agent_selection import resolve_cycle_agent
 from .config import InvestigationConfig
-from .files import confirm_prune_warning
 from .idea_generation import IdeaArtifactsError, load_idea_artifacts
 from .idea_retry_feedback import sanitize_validation_feedback, validation_feedback_from_output
-from .models import IdeaGenerationResult, PaperGenerationResult, RunAttemptResult
+from .models import IdeaGenerationResult, RunAttemptResult
 from .script_runners import copy_output_log_no_follow, write_output_log_no_follow
 from .task_failure import (
     AGENT_LOG_FAILURE, INFRASTRUCTURE_EXIT_CODE, TASK_CONTRACT_FAILURE, failure_details,
@@ -29,44 +26,16 @@ BestProgramCandidate = tuple[
 ]  # (program_dir, entrypoint_rel, score, correct)
 
 
-def _correct_incumbent_score(
-    best_manifest: dict[str, Any],
-    *,
-    harness_evaluated_attempts: bool,
-) -> float | None:
-    """Return a score gate only for a scientifically correct incumbent."""
-    score = best_manifest.get("combined_score")
-    if (
-        not harness_evaluated_attempts
-        or best_manifest.get("correct") is not True
-        or isinstance(score, bool)
-        or not isinstance(score, (int, float))
-        or not math.isfinite(float(score))
-    ):
-        return None
-    return float(score)
-
-
 def run_cycles_and_finalize(
     *,
     cfg: InvestigationConfig,
     task_dir: Path,
     results_dir: Path,
     global_memory_dir: Path,
-    shared_memory_dir: Path | None = None,
     conclusions_dir: Path | None = None,
     worker_index: int = 0,
     instruct_path: Path,
     idea_instruct_path: Path,
-    paper_instruct_path: Path,
-    paper_contributions_path: Path | None,
-    containerize: bool,
-    container_image: str,
-    container_network: str,
-    container_auth_root: Path,
-    container_env_file: Path | None,
-    container_session_name: str | None,
-    container_mount_root: Path | None,
     outer_state: dict[str, Any],
     best_manifest: dict[str, Any],
     best_program_dir: Path,
@@ -79,44 +48,25 @@ def run_cycles_and_finalize(
     format_elapsed_fn: Callable[[float], str],
     run_idea_generation_fn: Callable[..., IdeaGenerationResult],
     run_single_attempt_fn: Callable[..., RunAttemptResult],
-    run_paper_generation_fn: Callable[..., PaperGenerationResult],
     reconcile_legacy_idea_local_memory_fn: Callable[..., None],
     find_best_program_in_experiment_fn: Callable[[Path], BestProgramCandidate | None],
     read_json_fn: Callable[[Path], dict[str, Any] | None],
     utc_now_fn: Callable[[], str],
-    checkpoint_fn: Callable[..., None] = lambda **_kwargs: None,
 ) -> int:
-    """Execute campaign cycles and finalize optional paper output."""
-    agent_model = resolve_agent_model(cfg.agent, cfg.agent.name)
+    """Execute campaign cycles and record the final best program."""
     agent_profile = (
         str(cfg.agent.profile).strip()
         if isinstance(cfg.agent.profile, str) and cfg.agent.profile.strip()
         else None
     )
     reasoning_effort = cfg.agent.reasoning_effort
-    finalize_on_exit = cfg.versioning.finalize_on_exit
     if conclusions_dir is None:
         conclusions_dir = global_memory_dir
     state_store.ensure_conclusions_files(conclusions_dir)
-    prune_n = cfg.execution.prune_every_n_cycles
-    if prune_n > 0 and not containerize:
-        log_event_fn(
-            "prune_warning",
-            message=(
-                "Pruning is enabled but the agent is NOT containerized. "
-                "The agent will still have access to archived history and "
-                "idea files from previous chapters, so pruning may be "
-                "ineffective at resetting context."
-            ),
-        )
-        confirm_prune_warning()
-
     for cycle_idx in range(start_cycle, cfg.execution.max_idea_cycles + 1):
-        # Parallel workers number cycles locally; events also carry the
-        # campaign-wide position so progress output reads "Cycle 2/3".
         cycle_position = {
-            "global_cycle": cfg.execution.cycle_offset + cycle_idx,
-            "total_cycles": cfg.execution.total_cycles or cfg.execution.max_idea_cycles,
+            "global_cycle": cycle_idx,
+            "total_cycles": cfg.execution.max_idea_cycles,
         }
         assignments_before = outer_state.get("agent_cycle_assignments")
         selected_before = (
@@ -129,51 +79,6 @@ def run_cycles_and_finalize(
         )
         if selected_after != selected_before:
             state_store.save_outer_state(results_dir, outer_state)
-
-        # -- Idea pruning: reset context at chapter boundaries --
-        if prune_n > 0 and cycle_idx > start_cycle and (cycle_idx - 1) % prune_n == 0:
-            chapter = (cycle_idx - 1) // prune_n
-            log_event_fn(
-                "prune_start",
-                cycle=cycle_idx,
-                chapter=chapter,
-                prune_every_n_cycles=prune_n,
-            )
-            state_store.archive_for_prune(results_dir, global_memory_dir, chapter)
-            outer_state["prune_chapter"] = chapter + 1
-            outer_state["prune_every_n_cycles"] = prune_n
-            state_store.save_outer_state(results_dir, outer_state)
-            log_event_fn(
-                "prune_complete",
-                cycle=cycle_idx,
-                new_chapter=chapter + 1,
-                archive_dir=str(results_dir / "_pruned" / f"chapter_{chapter:03d}"),
-            )
-
-        # -- Shared memory sync: pull shared → local before cycle --
-        memory_pre_state: dict[str, int] | None = None
-        conclusions_pre_state: state_store.ConclusionsSyncState | None = None
-        if shared_memory_dir is not None:
-            sync_memory_files = shared_memory_dir.resolve() != global_memory_dir.resolve()
-            if sync_memory_files:
-                memory_pre_state = state_store.sync_memory_before_cycle(
-                    shared_memory_dir, global_memory_dir
-                )
-                logger.info(
-                    "Synced shared memory → local before cycle %d (jsonl_lines=%d, md_size=%d)",
-                    cycle_idx,
-                    memory_pre_state["jsonl_lines"],
-                    memory_pre_state["md_size"],
-                )
-            conclusions_pre_state = state_store.sync_conclusions_before_cycle(
-                shared_memory_dir, conclusions_dir, worker_index
-            )
-            logger.info(
-                "Synced shared conclusions → local before cycle %d (worker=%d, own_size=%d)",
-                cycle_idx,
-                worker_index,
-                conclusions_pre_state["own_conclusions_size"],
-            )
 
         cycle_started_at = time.monotonic()
         log_event_fn(
@@ -221,14 +126,6 @@ def run_cycles_and_finalize(
                     instruct_path=idea_instruct_path,
                     timeout_seconds=cfg.execution.idea_timeout_seconds,
                     timeout_grace_seconds=cfg.execution.run_timeout_grace_seconds,
-                    harness_evaluated_attempts=cfg.execution.harness_evaluated_attempts,
-                    containerize=containerize,
-                    container_image=container_image,
-                    container_network=container_network,
-                    container_auth_root=container_auth_root,
-                    container_env_file=container_env_file,
-                    container_session_name=container_session_name,
-                    container_mount_root=container_mount_root,
                     **({"validation_feedback": validation_feedback} if validation_feedback else {}),
                 )
             except OSError as exc:
@@ -253,10 +150,6 @@ def run_cycles_and_finalize(
                     pass
                 try:
                     log_event_fn("campaign_failed", **failure_record)
-                    checkpoint_fn(
-                        label=AGENT_LOG_FAILURE, phase="investigation", event="campaign_failed",
-                        cycle=cycle_idx, final=finalize_on_exit,
-                    )
                 except Exception:
                     pass
                 return INFRASTRUCTURE_EXIT_CODE
@@ -282,17 +175,11 @@ def run_cycles_and_finalize(
                 failure_reason = "idea_generation_exit_nonzero"
                 validation_feedback = validation_feedback_from_output(idea_result.output)
             else:
-                harness_incumbent_score = _correct_incumbent_score(
-                    best_manifest,
-                    harness_evaluated_attempts=cfg.execution.harness_evaluated_attempts,
-                )
                 try:
                     artifacts = load_idea_artifacts(
                         idea_workspace,
                         cycle_idx,
                         read_json_fn,
-                        require_harness_verification=cfg.execution.harness_evaluated_attempts,
-                        harness_incumbent_score=harness_incumbent_score,
                     )
                 except IdeaArtifactsError as exc:
                     failure_reason = exc.reason
@@ -364,30 +251,11 @@ def run_cycles_and_finalize(
                 failure_streak=failure_streak,
                 elapsed=format_elapsed_fn(time.monotonic() - cycle_started_at),
             )
-            if shared_memory_dir is not None:
-                if memory_pre_state is not None:
-                    state_store.sync_memory_after_cycle(
-                        shared_memory_dir, global_memory_dir, memory_pre_state
-                    )
-                if conclusions_pre_state is not None:
-                    state_store.sync_conclusions_after_cycle(
-                        shared_memory_dir,
-                        conclusions_dir,
-                        worker_index,
-                        conclusions_pre_state,
-                    )
             log_event_fn(
                 "campaign_failed",
                 reason="idea_generation_attempts_exhausted",
                 cycle=cycle_idx,
                 failure_streak=failure_streak,
-            )
-            checkpoint_fn(
-                label="final" if finalize_on_exit else f"campaign failed c{cycle_idx:03d}",
-                phase="investigation",
-                event="campaign_failed",
-                cycle=cycle_idx,
-                final=finalize_on_exit,
             )
             return 2
 
@@ -436,14 +304,6 @@ def run_cycles_and_finalize(
         outer_state["last_idea_id"] = idea_id
         outer_state["failure_streak"] = 0
         state_store.save_outer_state(results_dir, outer_state)
-        checkpoint_fn(
-            label=f"idea c{cycle_idx:03d} {idea_id}",
-            phase="investigation",
-            event="idea_drafted",
-            cycle=cycle_idx,
-            idea_id=idea_id,
-            agent=cycle_agent.agent,
-        )
 
         log_event_fn(
             "idea_bundle_loaded",
@@ -488,16 +348,6 @@ def run_cycles_and_finalize(
             timeout_seconds=cfg.execution.run_timeout_seconds,
             timeout_grace_seconds=cfg.execution.run_timeout_grace_seconds,
             max_program_evals_per_attempt=max_program_evals_per_attempt,
-            harness_evaluated_attempts=cfg.execution.harness_evaluated_attempts,
-            gpu_evaluation=cfg.execution.gpu_evaluation,
-            harness_evaluation_timeout_seconds=cfg.execution.harness_evaluation_timeout_seconds,
-            containerize=containerize,
-            container_image=container_image,
-            container_network=container_network,
-            container_auth_root=container_auth_root,
-            container_env_file=container_env_file,
-            container_session_name=container_session_name,
-            container_mount_root=container_mount_root,
         )
 
         output_tail = attempt_result.output[-1200:] if attempt_result.output else ""
@@ -535,11 +385,6 @@ def run_cycles_and_finalize(
             try:
                 log_step_end_fn("attempt", attempt_started_at, **failure)
                 log_event_fn("campaign_failed", **failure)
-                checkpoint_fn(
-                    label=failure_category, phase="investigation",
-                    event="campaign_failed", cycle=cycle_idx, idea_id=idea_id,
-                    final=finalize_on_exit,
-                )
             except Exception:
                 pass
             return failure_code
@@ -641,14 +486,6 @@ def run_cycles_and_finalize(
 
         state_store.append_jsonl(state_store.attempts_history_path(results_dir), attempt_record)
         state_store.save_outer_state(results_dir, outer_state)
-        checkpoint_fn(
-            label=f"evaluation c{cycle_idx:03d} a{attempt_number:02d}",
-            phase="investigation",
-            event="evaluation_complete",
-            cycle=cycle_idx,
-            idea_id=idea_id,
-            agent=cycle_agent.agent,
-        )
 
         log_step_end_fn(
             "attempt",
@@ -757,114 +594,6 @@ def run_cycles_and_finalize(
             elapsed=format_elapsed_fn(time.monotonic() - cycle_started_at),
         )
 
-        # -- Shared memory sync: push local → shared after cycle --
-        if shared_memory_dir is not None:
-            if memory_pre_state is not None:
-                state_store.sync_memory_after_cycle(
-                    shared_memory_dir, global_memory_dir, memory_pre_state
-                )
-                logger.info(
-                    "Synced local memory → shared after cycle %d",
-                    cycle_idx,
-                )
-            if conclusions_pre_state is not None:
-                state_store.sync_conclusions_after_cycle(
-                    shared_memory_dir,
-                    conclusions_dir,
-                    worker_index,
-                    conclusions_pre_state,
-                )
-                logger.info(
-                    "Synced local conclusions → shared after cycle %d (worker=%d)",
-                    cycle_idx,
-                    worker_index,
-                )
-
-    if cfg.paper.enabled:
-        paper_output_dir = (
-            results_dir
-            / "paper"
-            / f"final_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{time.time_ns()}"
-        )
-        paper_started_at = log_step_start_fn(
-            "paper_generation",
-            output_dir=paper_output_dir,
-            refs_min=cfg.paper.min_refs,
-            refs_max=cfg.paper.max_refs,
-        )
-        paper_result = run_paper_generation_fn(
-            agent=cfg.agent.name,
-            agent_model=agent_model,
-            agent_profile=agent_profile,
-            reasoning_effort=reasoning_effort,
-            task_dir=task_dir,
-            results_dir=results_dir,
-            global_memory_dir=global_memory_dir,
-            output_dir=paper_output_dir,
-            instruct_path=paper_instruct_path,
-            contributions_path=paper_contributions_path,
-            timeout_seconds=cfg.paper.timeout_seconds,
-            timeout_grace_seconds=cfg.paper.timeout_grace_seconds,
-            paper_min_refs=cfg.paper.min_refs,
-            paper_max_refs=cfg.paper.max_refs,
-            paper_profile=cfg.paper.profile,
-            two_stage=cfg.paper.two_stage,
-            paper_review_rounds=cfg.paper.review_rounds,
-            paper_max_repair_rounds=cfg.paper.max_repair_rounds,
-            final_ai_review=cfg.paper.ai_review,
-            containerize=containerize,
-            container_image=container_image,
-            container_network=container_network,
-            container_auth_root=container_auth_root,
-            container_env_file=container_env_file,
-            container_session_name=container_session_name,
-            container_mount_root=container_mount_root,
-        )
-        paper_workspace = paper_result.paper_dir if paper_result.paper_dir else paper_output_dir
-        paper_workspace.mkdir(parents=True, exist_ok=True)
-        paper_log_path = paper_workspace / "wrapper_output.log"
-        state_store.write_private_text(paper_log_path, paper_result.output)
-        log_step_end_fn(
-            "paper_generation",
-            paper_started_at,
-            exit=paper_result.exit_code,
-            paper_workspace=paper_workspace,
-            log_path=paper_log_path,
-        )
-
-        if paper_result.exit_code != 0:
-            log_event_fn(
-                "paper_generation_failed",
-                exit=paper_result.exit_code,
-                log_path=paper_log_path,
-                tail_chars=1200,
-                output_tail=paper_result.output[-1200:],
-            )
-            checkpoint_fn(
-                label="final" if finalize_on_exit else "paper failed",
-                phase="paper",
-                event="paper_generation_failed",
-                final=finalize_on_exit,
-            )
-            return 2
-
-        latest_manifest = results_dir / "paper" / "latest_manifest.json"
-        if not latest_manifest.exists():
-            log_event_fn(
-                "paper_generation_error",
-                reason="missing_latest_manifest",
-                path=latest_manifest,
-            )
-            checkpoint_fn(
-                label="final" if finalize_on_exit else "paper failed",
-                phase="paper",
-                event="paper_generation_error",
-                final=finalize_on_exit,
-            )
-            return 2
-        log_event_fn("paper_generation_complete", paper_workspace=paper_workspace)
-        checkpoint_fn(label="paper", phase="paper", event="paper_generation_complete")
-
     log_event_fn(
         "finished",
         cycles_completed=outer_state.get("current_cycle", 0),
@@ -874,11 +603,5 @@ def run_cycles_and_finalize(
         best_score=best_manifest.get("combined_score"),
         best_correct=best_manifest.get("correct"),
         total_runtime_elapsed=format_elapsed_fn(time.monotonic() - main_started_at),
-    )
-    checkpoint_fn(
-        label="final" if finalize_on_exit else "campaign finished",
-        phase="investigation",
-        event="finished",
-        final=finalize_on_exit,
     )
     return 0

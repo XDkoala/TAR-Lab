@@ -846,6 +846,8 @@ def main(argv: list[str] | None = None) -> int:
         result = run_evaluation(
             evaluator=args.evaluator,
             program_dir=args.program_dir,
+            # The task's own interpreter (set by the investigation CLI), else this one.
+            python_executable=os.environ.get("TASK_PYTHON") or sys.executable,
             evaluator_args=evaluator_args,
             timeout_seconds=args.timeout_seconds,
             report_paths=report_paths,

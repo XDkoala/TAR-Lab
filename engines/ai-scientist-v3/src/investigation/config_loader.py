@@ -14,21 +14,12 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 
-from .constants import (
-    DEFAULT_GIT_DIR_NAME,
-    DEFAULT_PAPER_MAX_REPAIR_ROUNDS,
-    DEFAULT_PAPER_TIMEOUT_SECONDS,
-)
 from .config import (
     AgentConfig,
     ConfigValidationError,
-    ContainerConfig,
     ExecutionConfig,
     LoggingConfig,
-    PaperConfig,
     PathsConfig,
-    TaskDraftingConfig,
-    VersioningConfig,
     InvestigationConfig,
     resolve_defaults,
     validate,
@@ -59,12 +50,6 @@ def _normalize_cli_overrides(overrides: list[str]) -> list[str]:
             normalized.append("logging.verbose=true")
             index += 1
             continue
-        if override == "--standalone-paper":
-            normalized.extend(
-                ["paper.enabled=true", "paper.profile=standalone", "paper.two_stage=true"]
-            )
-            index += 1
-            continue
         if override.startswith("agent.models."):
             normalized.append(f"++{override}")
             index += 1
@@ -78,7 +63,7 @@ def load_config(overrides: list[str] | None = None) -> InvestigationConfig:
     """Load and validate the investigation configuration using the Hydra Compose API.
 
     Args:
-        overrides: Hydra-style override strings, e.g. ``["container.enabled=true", "execution.workers=4"]``.
+        overrides: Hydra-style override strings, e.g. ``["execution.workers=4"]``.
                    When ``None``, defaults to ``sys.argv[1:]``.
 
     Returns:
@@ -206,11 +191,7 @@ _KNOWN_TOP_LEVEL_KEYS = {
     "agent",
     "paths",
     "execution",
-    "task_drafting",
-    "paper",
-    "container",
     "logging",
-    "versioning",
     "run_id",
 }
 
@@ -220,11 +201,7 @@ _GROUP_FIELDS: dict[str, set[str]] = {
         ("agent", AgentConfig),
         ("paths", PathsConfig),
         ("execution", ExecutionConfig),
-        ("task_drafting", TaskDraftingConfig),
-        ("paper", PaperConfig),
-        ("container", ContainerConfig),
         ("logging", LoggingConfig),
-        ("versioning", VersioningConfig),
     ]
 }
 
@@ -282,11 +259,7 @@ def _dict_to_config(d: dict) -> InvestigationConfig:
     agent_d = d.get("agent", {})
     paths_d = d.get("paths", {})
     execution_d = d.get("execution", {})
-    task_drafting_d = d.get("task_drafting", {})
-    paper_d = d.get("paper", {})
-    container_d = d.get("container", {})
     logging_d = d.get("logging", {})
-    versioning_d = d.get("versioning", {})
 
     return InvestigationConfig(
         agent=AgentConfig(
@@ -301,114 +274,27 @@ def _dict_to_config(d: dict) -> InvestigationConfig:
             task_dir=str(paths_d.get("task_dir", "examples/circpack")),
             results_dir=paths_d.get("results_dir"),
             global_memory_dir=paths_d.get("global_memory_dir"),
-            shared_memory_dir=paths_d.get("shared_memory_dir"),
-            conclusions_dir=paths_d.get("conclusions_dir"),
             instruct=paths_d.get("instruct"),
-            paper_instruct=paths_d.get("paper_instruct"),
-            paper_contributions=paths_d.get("paper_contributions"),
-            seed_program=_optional_str(paths_d.get("seed_program")),
+            task_python=_optional_str(paths_d.get("task_python")),
         ),
         execution=ExecutionConfig(
             max_idea_cycles=int(execution_d.get("max_idea_cycles", 20)),
-            workers=int(execution_d.get("workers", 1)),
             resume=bool(execution_d.get("resume", False)),
-            draft_task_if_missing=bool(execution_d.get("draft_task_if_missing", False)),
-            task_only=bool(execution_d.get("task_only", False)),
             max_program_evals_per_attempt=int(
                 execution_d.get("max_program_evals_per_attempt", 4)
             ),
-            harness_evaluated_attempts=bool(
-                execution_d.get("harness_evaluated_attempts", False)
-            ),
-            gpu_evaluation=bool(execution_d.get("gpu_evaluation", False)),
             run_timeout_seconds=int(execution_d.get("run_timeout_seconds", 21600)),
-            harness_evaluation_timeout_seconds=execution_d.get(
-                "harness_evaluation_timeout_seconds", 7200
-            ),
             idea_timeout_seconds=int(execution_d.get("idea_timeout_seconds", 3600)),
             max_idea_generation_attempts=int(
                 execution_d.get("max_idea_generation_attempts", 2)
             ),
             run_timeout_grace_seconds=int(execution_d.get("run_timeout_grace_seconds", 30)),
-            prune_every_n_cycles=int(execution_d.get("prune_every_n_cycles", 0)),
-            parallel_fail_fast=bool(execution_d.get("parallel_fail_fast", False)),
-            worker_index=int(execution_d.get("worker_index", 0)),
-            cycle_offset=int(execution_d.get("cycle_offset", 0)),
-            total_cycles=int(execution_d.get("total_cycles", 0)),
-            isolate_worker_memory=bool(
-                execution_d.get("isolate_worker_memory", False)
-            ),
-        ),
-        task_drafting=TaskDraftingConfig(
-            workflow=str(task_drafting_d.get("workflow", "robust")),
-            design_max_repairs=int(task_drafting_d.get("design_max_repairs", 8)),
-            contract_max_repairs=int(task_drafting_d.get("contract_max_repairs", 3)),
-            smoke_max_repairs=int(task_drafting_d.get("smoke_max_repairs", 3)),
-            smoke_max_infrastructure_attempts=task_drafting_d.get(
-                "smoke_max_infrastructure_attempts", 3
-            ),
-            alignment_max_repairs=int(task_drafting_d.get("alignment_max_repairs", 10)),
-            qualification_max_repairs=int(
-                task_drafting_d.get("qualification_max_repairs", 4)
-            ),
-            agent_transient_max_attempts=int(
-                task_drafting_d.get("agent_transient_max_attempts", 4)
-            ),
-            qualification_max_infrastructure_attempts=int(
-                task_drafting_d.get("qualification_max_infrastructure_attempts", 3)
-            ),
-            production_entry_timeout_seconds=int(
-                task_drafting_d.get("production_entry_timeout_seconds", 300)
-            ),
-            max_gate_checks_per_repair=int(
-                task_drafting_d.get("max_gate_checks_per_repair", 12)
-            ),
-            max_runtime_bytes=task_drafting_d.get(
-                "max_runtime_bytes", 16 * 1024 * 1024 * 1024
-            ),
-            draft_max_attempts=int(task_drafting_d.get("draft_max_attempts", 3)),
-            evaluator_smoke_timeout_seconds=int(
-                task_drafting_d.get("evaluator_smoke_timeout_seconds", 1800)
-            ),
-        ),
-        paper=PaperConfig(
-            enabled=bool(paper_d.get("enabled", False)),
-            profile=str(paper_d.get("profile", "default")),
-            two_stage=bool(paper_d.get("two_stage", False)),
-            ai_review=str(paper_d.get("ai_review", "disabled")),
-            review_rounds=int(paper_d.get("review_rounds", 0)),
-            max_repair_rounds=int(paper_d.get("max_repair_rounds", DEFAULT_PAPER_MAX_REPAIR_ROUNDS)),
-            timeout_seconds=int(paper_d.get("timeout_seconds", DEFAULT_PAPER_TIMEOUT_SECONDS)),
-            timeout_grace_seconds=int(paper_d.get("timeout_grace_seconds", 30)),
-            min_refs=int(paper_d.get("min_refs", 8)),
-            max_refs=int(paper_d.get("max_refs", 15)),
-        ),
-        container=ContainerConfig(
-            enabled=bool(container_d.get("enabled", False)),
-            image=str(container_d.get("image", "agentic-scientist/agent-cli:latest")),
-            network=str(container_d.get("network", "bridge")),
-            auth_root=str(container_d.get("auth_root", "~")),
-            env_file=str(container_d.get("env_file", "") or ""),
-            gpu_count=container_d.get("gpu_count", 0),
         ),
         logging=LoggingConfig(
             format=str(logging_d.get("format", "human")),
             verbose=bool(logging_d.get("verbose", False)),
             heartbeat_seconds=int(logging_d.get("heartbeat_seconds", 60)),
             show_run_header=bool(logging_d.get("show_run_header", True)),
-        ),
-        versioning=VersioningConfig(
-            enabled=bool(versioning_d.get("enabled", True)),
-            run_root=_optional_str(versioning_d.get("run_root")),
-            git_dir_name=str(versioning_d.get("git_dir_name", DEFAULT_GIT_DIR_NAME)),
-            max_file_bytes=int(versioning_d.get("max_file_bytes", 0)),
-            max_total_bytes=int(versioning_d.get("max_total_bytes", 16 * 1024**3)),
-            timeout_seconds=int(versioning_d.get("timeout_seconds", 600)),
-            tag_checkpoints=bool(versioning_d.get("tag_checkpoints", True)),
-            final_include_environments=bool(
-                versioning_d.get("final_include_environments", False)
-            ),
-            finalize_on_exit=bool(versioning_d.get("finalize_on_exit", True)),
         ),
         run_id=str(d.get("run_id", "")) if d.get("run_id") else InvestigationConfig().run_id,
     )
@@ -418,8 +304,6 @@ _CONFIG_GROUPS: list[tuple[str, type]] = [
     ("agent", AgentConfig),
     ("paths", PathsConfig),
     ("execution", ExecutionConfig),
-    ("paper", PaperConfig),
-    ("container", ContainerConfig),
     ("logging", LoggingConfig),
 ]
 
@@ -427,19 +311,17 @@ _CONFIG_GROUPS: list[tuple[str, type]] = [
 def _print_help() -> None:
     """Print help text for the investigation CLI, auto-generated from field metadata."""
     lines = [
-        "usage: agsci investigate [HYDRA_OVERRIDES...]",
+        "usage: python -m src.investigation.cli [HYDRA_OVERRIDES...]",
         "",
-        "Rubric-driven investigation loop: idea generation, attempts, and paper.",
+        "Rubric-driven investigation loop: idea generation and attempts.",
         "",
         "Configuration is loaded from configs/config.yaml and composed",
         "with CLI overrides using Hydra syntax.",
         "",
         "Examples:",
-        "  agsci investigate                                        # defaults",
-        "  agsci investigate container.enabled=true container.network=host",
-        "  agsci investigate --standalone-paper                      # standalone paper workflow",
-        "  agsci investigate container.enabled=true execution.max_idea_cycles=5",
-        "  agsci investigate agent.name=gemini paths.task_dir=examples/kissing",
+        "  python -m src.investigation.cli                          # defaults",
+        "  python -m src.investigation.cli execution.max_idea_cycles=5",
+        "  python -m src.investigation.cli agent.name=codex paths.task_dir=examples/circpack",
         "",
         "Config keys:",
     ]
@@ -452,10 +334,6 @@ def _print_help() -> None:
 
     lines.append("")
     lines.append("Convenience flags:")
-    lines.append(
-        "  --standalone-paper                 paper.enabled=true paper.profile=standalone "
-        "paper.two_stage=true"
-    )
     lines.append("  --log-format human|json            Select terminal log renderer")
     lines.append("  --verbose                          Show detailed human logs")
     lines.append("")

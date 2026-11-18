@@ -23,7 +23,6 @@ from .cost_tracking import (
     summary_output_tokens,
 )
 from .event_renderers import HumanRenderer, JsonRenderer
-from .paper_events import is_paper_heartbeat, paper_gate_label, paper_gate_name
 from .storage_failures import storage_failure_category, warn_storage_failure
 from .terminal_ui import (
     PROGRESS_LABELS as _PROGRESS_LABELS,
@@ -36,36 +35,15 @@ from .terminal_ui import (
 )
 
 _STEP_PHASES = {
-    "task_draft": "task",
     "idea_generation": "idea",
     "attempt": "run",
-    "paper_generation": "paper",
 }
-_PROGRESS_END_EVENTS = {"analysis_result", "phase_end", "stage_end", "variant_result"}
-_COST_START_EVENTS = {"parallel_start", "phase_start", "stage_start", "step_start"}
-_COST_END_EVENTS = {"parallel_end", "phase_end", "stage_end", "step_end"}
-_COST_FINAL_EVENTS = {"campaign_failed", "finished", "pipeline_end"}
-_COST_NAMED_START_EVENTS = {"paper_ai_review_started"}
-_COST_NAMED_END_EVENTS = {"paper_ai_review_completed", "paper_ai_review_failed"}
+_COST_START_EVENTS = {"step_start"}
+_COST_END_EVENTS = {"step_end"}
+_COST_FINAL_EVENTS = {"campaign_failed", "finished"}
 _COST_READ_ERRORS = (CostTrackingError, ArithmeticError, OSError, TypeError, ValueError)
-_TASK_PROGRESS_COST_READ_TIMEOUT_SECONDS = 0.5
 _CostSnapshot = tuple[Decimal, Decimal, int, int, int, int, int]
 _EMPTY_COST_SNAPSHOT: _CostSnapshot = (Decimal(0), Decimal(0), 0, 0, 0, 0, 0)
-_TASK_PROGRESS_COST_FIELDS = {
-    "cost_message",
-    "pipeline_elapsed",
-    "pipeline_elapsed_seconds",
-    "run_cost_usd",
-    "run_output_tokens",
-    "task_cost_usd",
-    "task_estimated_cost_usd",
-    "task_estimated_events",
-    "task_output_tokens",
-    "task_reported_cost_usd",
-    "task_unknown_events",
-    "task_unreported_usage_events",
-    "task_usage_only_events",
-}
 
 
 def utc_timestamp() -> str:
@@ -92,14 +70,10 @@ def infer_phase(event: str, fields: dict[str, Any]) -> str | None:
     step = fields.get("step")
     if isinstance(step, str):
         return _STEP_PHASES.get(step)
-    if event.startswith("task_"):
-        return "task"
     if event.startswith("idea_"):
         return "idea"
     if event.startswith(("attempt_", "run_")):
         return "run"
-    if event.startswith("paper_"):
-        return "paper"
     return None
 
 
@@ -165,24 +139,15 @@ class EventLogger:
         self._journal_warning_emitted = False
         self._active_progress: dict[str, Any] | None = None
         self._preparation_progress_stack: list[tuple[str, dict[str, Any] | None]] = []
-        self._task_drafting_progress_stack: list[dict[str, Any]] = []
         self._progress_stop = threading.Event()
         self._progress_thread: threading.Thread | None = None
         self._closed = False
         self._spinner_index = 0
         self._cost_baselines: dict[str, _CostSnapshot] = {}
-        self._paper_gate_started_at: dict[str, float] = {}
-        self._task_cost_summary_lock = threading.Lock()
-        self._task_cost_summary: dict[str, Any] | None = None
-        self._task_cost_reader: threading.Thread | None = None
         try:
             self._run_cost_baseline = self._cost_snapshot()
         except _COST_READ_ERRORS:
             self._run_cost_baseline = _EMPTY_COST_SNAPSHOT
-        self._paper_checkpoint_cost_baseline = self._run_cost_baseline
-        self._paper_checkpoint_cost_baseline_valid = False
-        self._task_checkpoint_cost_baseline = self._run_cost_baseline
-        self._task_checkpoint_cost_baseline_valid = True
         self.renderer = (
             HumanRenderer(
                 self.stream,
@@ -196,21 +161,7 @@ class EventLogger:
         )
 
     def emit(self, event: str, **fields: Any) -> None:
-        if event == "task_drafting_checkpoint":
-            fields = {
-                key: value
-                for key, value in fields.items()
-                if key not in _TASK_PROGRESS_COST_FIELDS
-            }
-            cost_checkpoint = fields.pop("cost_checkpoint", False) is True
-            if fields.get("state") == "started":
-                self._capture_task_checkpoint_cost_baseline()
-            elif cost_checkpoint:
-                fields.update(self._task_drafting_cost_fields())
         normalized_fields = normalize_value(fields)
-        paper_heartbeat = event == "paper_gate" and is_paper_heartbeat(
-            normalized_fields.get("state"), normalized_fields
-        )
         record = {
             "timestamp": self.timestamp_fn(),
             "source": self.source,
@@ -221,113 +172,15 @@ class EventLogger:
             "fields": normalized_fields,
         }
         with self._lock:
-            if not paper_heartbeat:
-                self._clear_transient_locked()
-            self._update_paper_gate_elapsed(event, normalized_fields)
+            self._clear_transient_locked()
             self._capture_cost_baseline(event, normalized_fields)
-            if event in _PROGRESS_END_EVENTS:
-                self._active_progress = None
-                self._preparation_progress_stack.clear()
-                self._task_drafting_progress_stack.clear()
-            if event == "task_drafting_checkpoint" and normalized_fields.get("state") in {
-                "completed",
-                "failed",
-                "skipped",
-            }:
-                for index in range(len(self._task_drafting_progress_stack) - 1, -1, -1):
-                    if self._task_drafting_progress_stack[index]["fields"].get(
-                        "gate"
-                    ) == normalized_fields.get("gate"):
-                        del self._task_drafting_progress_stack[index]
-                        break
-                if (
-                    self._active_progress is not None
-                    and self._active_progress.get("step") == "task_drafting_checkpoint"
-                ):
-                    self._active_progress = (
-                        self._task_drafting_progress_stack[-1]
-                        if self._task_drafting_progress_stack
-                        else None
-                    )
-            if event == "paper_gate" and normalized_fields.get("state") != "started":
-                self._active_progress = None
             if event in {"interrupted", "campaign_failed"}:
                 self._active_progress = None
                 self._preparation_progress_stack.clear()
-                self._task_drafting_progress_stack.clear()
             self._write_record_locked(record)
             self._write_cost_checkpoint(event, normalized_fields)
             if event == "preparation_step":
                 self._update_preparation_progress(normalized_fields)
-            if event.endswith("_start") and event in {
-                "analysis_start",
-                "stage_start",
-                "variant_start",
-            }:
-                label = self._progress_label(event, normalized_fields)
-                progress_fields = dict(normalized_fields)
-                progress_fields["label"] = label
-                self.start_progress(
-                    event,
-                    started_at=self.monotonic_fn(),
-                    **progress_fields,
-                )
-            elif event == "phase_start" and not self._uses_transient_progress():
-                label = self._progress_label(event, normalized_fields)
-                progress_fields = dict(normalized_fields)
-                progress_fields["label"] = label
-                self.start_progress(
-                    event,
-                    started_at=self.monotonic_fn(),
-                    **progress_fields,
-                )
-            elif (
-                event == "paper_gate"
-                and normalized_fields.get("state") == "started"
-                and not paper_heartbeat
-            ):
-                gate = paper_gate_label(normalized_fields.get("gate", "paper"), normalized_fields)
-                self.start_progress(
-                    "paper_gate",
-                    started_at=self.monotonic_fn(),
-                    label=f"Writing · {gate.lower()}…",
-                    gate=gate,
-                )
-            elif (
-                event == "task_drafting_checkpoint"
-                and normalized_fields.get("state") == "started"
-            ):
-                if (
-                    self._task_drafting_progress_stack
-                    and self._task_drafting_progress_stack[-1]["fields"].get("gate")
-                    == normalized_fields.get("gate")
-                    and self._task_drafting_progress_stack[-1]["fields"].get("state")
-                    == "retrying"
-                ):
-                    self._task_drafting_progress_stack.pop()
-                progress_fields = dict(normalized_fields)
-                progress_fields["label"] = str(
-                    normalized_fields.get("label") or "Task drafting…"
-                )
-                self.start_progress(
-                    "task_drafting_checkpoint",
-                    started_at=self.monotonic_fn(),
-                    **progress_fields,
-                )
-                if (
-                    self._active_progress is not None
-                    and self._active_progress.get("step") == "task_drafting_checkpoint"
-                ):
-                    self._task_drafting_progress_stack.append(self._active_progress)
-            elif (
-                event == "task_drafting_checkpoint"
-                and normalized_fields.get("state") == "retrying"
-                and self._active_progress is not None
-                and self._active_progress.get("step") == "task_drafting_checkpoint"
-                and self._active_progress["fields"].get("gate")
-                == normalized_fields.get("gate")
-            ):
-                self._active_progress["fields"].update(normalized_fields)
 
     def _update_preparation_progress(self, fields: dict[str, Any]) -> None:
         step = str(fields["step"])
@@ -353,12 +206,6 @@ class EventLogger:
     def _cost_label(event: str, fields: dict[str, Any]) -> str:
         if event in _COST_FINAL_EVENTS:
             return "final run"
-        if event == "paper_gate":
-            return paper_gate_name(fields.get("gate", "paper"))
-        if event.startswith("parallel_"):
-            return "parallel campaign"
-        if event.startswith("paper_ai_review_"):
-            return "final AI review"
         value = (
             fields.get("label")
             or fields.get("phase_name")
@@ -373,18 +220,8 @@ class EventLogger:
     def _cost_key(event: str, fields: dict[str, Any]) -> str | None:
         if event in _COST_FINAL_EVENTS:
             return "final"
-        if event.startswith("paper_ai_review_"):
-            return "stage:final AI review"
-        if event.startswith("parallel_"):
-            kind = "parallel"
-        elif event.startswith("phase_"):
-            kind = "phase"
-        elif event.startswith("stage_"):
-            kind = "stage"
-        elif event.startswith("step_"):
+        if event.startswith("step_"):
             kind = "step"
-        elif event == "paper_gate":
-            kind = "paper_gate"
         else:
             return None
         return f"{kind}:{EventLogger._cost_label(event, fields)}"
@@ -414,64 +251,6 @@ class EventLogger:
     def _cost_snapshot(self) -> _CostSnapshot:
         return self._cost_snapshot_from_summary(load_summary(self.cost_root))
 
-    def _task_drafting_cost_fields(self) -> dict[str, str | int | float]:
-        if not self._task_checkpoint_cost_baseline_valid:
-            return {}
-        baseline = self._task_checkpoint_cost_baseline
-        summary = self._task_drafting_cost_summary()
-        if summary is None:
-            self._task_checkpoint_cost_baseline_valid = False
-            return {}
-        try:
-            current = self._cost_snapshot_from_summary(summary)
-            reported_total, estimated_total = current[:2]
-            reported = max(Decimal(0), reported_total - baseline[0])
-            estimated = max(Decimal(0), estimated_total - baseline[1])
-            run_total = reported_total + estimated_total
-            estimated_events = max(0, current[2] - baseline[2])
-            usage_only = max(0, current[3] - baseline[3])
-            unknown = max(0, current[4] - baseline[4])
-            tokens = max(0, current[5] - baseline[5])
-            unreported = max(0, current[6] - baseline[6])
-            message = format_cost_checkpoint(
-                summary,
-                label="task drafting",
-                baseline_output_tokens=baseline[5],
-                baseline_unreported=baseline[6],
-            )
-        except _COST_READ_ERRORS:
-            self._task_checkpoint_cost_baseline_valid = False
-            return {}
-        self._task_checkpoint_cost_baseline = current
-        self._task_checkpoint_cost_baseline_valid = True
-        fields: dict[str, str | int | float] = {
-            "task_reported_cost_usd": f"{reported:.2f}",
-            "task_estimated_cost_usd": f"{estimated:.2f}",
-            "task_cost_usd": f"{reported + estimated:.2f}",
-            "run_cost_usd": f"{run_total:.2f}",
-            "task_estimated_events": estimated_events,
-            "task_usage_only_events": usage_only,
-            "task_unknown_events": unknown,
-            "task_output_tokens": tokens,
-            "run_output_tokens": current[5],
-            "task_unreported_usage_events": unreported,
-            "cost_message": message,
-        }
-        fields.update(self._pipeline_elapsed_fields())
-        return fields
-
-    def _capture_task_checkpoint_cost_baseline(self) -> None:
-        summary = self._task_drafting_cost_summary()
-        if summary is None:
-            self._task_checkpoint_cost_baseline_valid = False
-            return
-        try:
-            self._task_checkpoint_cost_baseline = self._cost_snapshot_from_summary(summary)
-        except _COST_READ_ERRORS:
-            self._task_checkpoint_cost_baseline_valid = False
-            return
-        self._task_checkpoint_cost_baseline_valid = True
-
     def _pipeline_elapsed_fields(self) -> dict[str, str | float]:
         if self.pipeline_started_at is None:
             return {}
@@ -481,55 +260,10 @@ class EventLogger:
             "pipeline_elapsed": format_pipeline_elapsed(elapsed_seconds),
         }
 
-    def _task_drafting_cost_summary(self) -> dict[str, Any] | None:
-        with self._task_cost_summary_lock:
-            reader = self._task_cost_reader
-            if reader is not None and reader.is_alive():
-                return None
-            self._task_cost_summary = None
-            reader = threading.Thread(
-                target=self._refresh_task_drafting_cost_summary,
-                name="task-drafting-cost-reader",
-                daemon=True,
-            )
-            self._task_cost_reader = reader
-            reader.start()
-        reader.join(_TASK_PROGRESS_COST_READ_TIMEOUT_SECONDS)
-        if reader.is_alive():
-            return None
-        with self._task_cost_summary_lock:
-            if self._task_cost_reader is not reader:
-                return None
-            return self._task_cost_summary
-
-    def _refresh_task_drafting_cost_summary(self) -> None:
-        try:
-            summary = load_summary(self.cost_root)
-        except _COST_READ_ERRORS:
-            return
-        with self._task_cost_summary_lock:
-            self._task_cost_summary = summary
-
     def _capture_cost_baseline(self, event: str, fields: dict[str, Any]) -> None:
         if self.worker_index != 0:
             return
-        if event == "paper_gate":
-            if is_paper_heartbeat(fields.get("state"), fields):
-                return
-            if (
-                fields.get("state") == "started"
-                and not self._paper_checkpoint_cost_baseline_valid
-            ):
-                try:
-                    self._paper_checkpoint_cost_baseline = self._cost_snapshot()
-                except _COST_READ_ERRORS:
-                    return
-                self._paper_checkpoint_cost_baseline_valid = True
-            return
-        is_start = (
-            event in _COST_START_EVENTS
-            or event in _COST_NAMED_START_EVENTS
-        )
+        is_start = event in _COST_START_EVENTS
         key = self._cost_key(event, fields)
         if not is_start or key is None:
             return
@@ -538,21 +272,11 @@ class EventLogger:
         except _COST_READ_ERRORS:
             baseline = _EMPTY_COST_SNAPSHOT
         self._cost_baselines[key] = baseline
-        if key == "step:task draft":
-            self._task_checkpoint_cost_baseline = baseline
-            self._task_checkpoint_cost_baseline_valid = True
 
     def _write_cost_checkpoint(self, event: str, fields: dict[str, Any]) -> None:
         if self.worker_index != 0:
             return
-        if event == "paper_gate":
-            self._write_paper_cost_checkpoint(fields)
-            return
-        is_end = (
-            event in _COST_END_EVENTS
-            or event in _COST_NAMED_END_EVENTS
-            or event in _COST_FINAL_EVENTS
-        )
+        is_end = event in _COST_END_EVENTS or event in _COST_FINAL_EVENTS
         key = self._cost_key(event, fields)
         summary_path = self.cost_root / "metrics" / "cost_summary.json"
         if not is_end or key is None or not summary_path.is_file():
@@ -573,29 +297,6 @@ class EventLogger:
             return
         cost_fields.update(self._pipeline_elapsed_fields())
         self._write_cost_record(event, fields, cost_fields)
-
-    def _write_paper_cost_checkpoint(self, fields: dict[str, Any]) -> None:
-        if fields.get("state") not in {"completed", "failed"}:
-            return
-        summary_path = self.cost_root / "metrics" / "cost_summary.json"
-        if not self._paper_checkpoint_cost_baseline_valid or not summary_path.is_file():
-            return
-        baseline = self._paper_checkpoint_cost_baseline
-        try:
-            summary = load_summary(self.cost_root)
-            current, cost_fields = self._cost_checkpoint_fields(
-                summary=summary,
-                baseline=baseline,
-                label=self._cost_label("paper_gate", fields),
-            )
-        except _COST_READ_ERRORS:
-            return
-        self._paper_checkpoint_cost_baseline = current
-        has_activity = any(current[index] > baseline[index] for index in range(len(current)))
-        if not has_activity:
-            return
-        cost_fields.update(self._pipeline_elapsed_fields())
-        self._write_cost_record("paper_gate", fields, cost_fields)
 
     def _cost_checkpoint_fields(
         self,
@@ -649,32 +350,6 @@ class EventLogger:
             "fields": cost_fields,
         }
         self._write_record_locked(record)
-
-    def _update_paper_gate_elapsed(self, event: str, fields: dict[str, Any]) -> None:
-        if event != "paper_gate" or is_paper_heartbeat(fields.get("state"), fields):
-            return
-        fields.pop("elapsed", None)
-        fields.pop("elapsed_seconds", None)
-        gate = str(fields.get("gate", "paper"))
-        state = fields.get("state")
-        if state == "started":
-            self._paper_gate_started_at[gate] = self.monotonic_fn()
-            return
-        started_at = self._paper_gate_started_at.pop(gate, None)
-        if state not in {"completed", "failed"} or started_at is None:
-            return
-        elapsed_seconds = max(0.0, self.monotonic_fn() - started_at)
-        fields["elapsed_seconds"] = round(elapsed_seconds, 1)
-        fields["elapsed"] = format_duration(elapsed_seconds)
-
-    @staticmethod
-    def _progress_label(event: str, fields: dict[str, Any]) -> str:
-        label = fields.get("label") or fields.get("title") or fields.get("name")
-        if event == "variant_start":
-            return f"Evaluating {label or 'variant'}…"
-        if event == "analysis_start":
-            return f"Running {label or 'analysis'}…"
-        return f"Running {label or fields.get('stage') or 'phase'}…"
 
     def start_progress(self, step: str, *, started_at: float, **fields: Any) -> None:
         """Track a long-running step for TTY refreshes and durable heartbeats."""
@@ -849,5 +524,4 @@ class EventLogger:
             self._clear_transient_locked()
             self._active_progress = None
             self._preparation_progress_stack.clear()
-            self._task_drafting_progress_stack.clear()
             self.stream.flush()
