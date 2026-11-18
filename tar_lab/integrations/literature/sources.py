@@ -2,21 +2,32 @@
 
 Used when Undermind is rate limited, out of quota, or unreachable. Every source is optional:
 a failing source is reported next to the results instead of failing the whole call.
+
+API keys come from the environment or, for processes that don't inherit the user's shell (a
+systemd user service, the per-order MCP servers), from ``~/.config/tar-lab/literature.env``.
+Semantic Scholar and arXiv requests are paced machine-wide (see ``ratelimit``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import os
 import re
+import sys
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx2
 
 from tar_lab.integrations.undermind.http import make_http_client
+from tar_lab.orchestration.notify import read_env_file
+
+from .ratelimit import RateLimiter
 
 OPENALEX = "https://api.openalex.org"
 S2 = "https://api.semanticscholar.org/graph/v1"
@@ -28,6 +39,13 @@ _S2_FIELDS = ("title,year,authors,venue,externalIds,citationCount,openAccessPdf,
 _OA_SELECT = ("id,doi,display_name,publication_year,cited_by_count,open_access,authorships,"
               "primary_location,abstract_inverted_index,referenced_works_count")
 ABSTRACT_CHARS = 1200
+S2_KEY_NAMES = ("TARLAB_S2_API_KEY", "SEMANTIC_SCHOLAR_API_KEY")
+OPENALEX_KEY_NAMES = ("TARLAB_OPENALEX_API_KEY", "OPENALEX_API_KEY")
+FILE_KEYS = (*S2_KEY_NAMES, *OPENALEX_KEY_NAMES, "TARLAB_OPENALEX_MAILTO",
+             "TARLAB_S2_MIN_INTERVAL", "TARLAB_ARXIV_MIN_INTERVAL")
+S2_MIN_INTERVAL = 1.05   # a key grants a dedicated 1 request/s; be as polite without one
+ARXIV_MIN_INTERVAL = 3.0  # arXiv API terms: no more than one request every three seconds
+RETRY_AFTER_CAP = 60.0
 
 
 @dataclass
@@ -83,8 +101,84 @@ async def _http_get(url: str, params: Mapping[str, Any], headers: Mapping[str, s
         return await c.get(url, params=dict(params), headers=dict(headers))
 
 
-def _env(*names: str) -> str | None:
-    return next((v for n in names if (v := os.environ.get(n))), None)
+def literature_env_path() -> Path:
+    """``$TARLAB_LITERATURE_ENV``, else ``$XDG_CONFIG_HOME/tar-lab/literature.env``."""
+    if override := os.environ.get("TARLAB_LITERATURE_ENV"):
+        return Path(override)
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "tar-lab" / "literature.env"
+
+
+_warned_paths: set[Path] = set()
+
+
+def _read_key_file(path: Path) -> dict[str, str]:
+    try:
+        values = read_env_file(path)
+        mode = path.stat().st_mode if values else 0
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"[tar-lab] literature: cannot read {path} ({type(exc).__name__})",
+              file=sys.stderr)
+        return {}
+    if mode & 0o077 and path not in _warned_paths:
+        _warned_paths.add(path)
+        print(f"[tar-lab] literature: {path} is readable by other users; "
+              f"run `chmod 600 {path}`", file=sys.stderr)
+    return {k: v for k, v in values.items() if k in FILE_KEYS and v}
+
+
+@dataclass(frozen=True)
+class LiteratureConfig:
+    """Settings from the environment, falling back to the key file; never prints values."""
+
+    env: Mapping[str, str]
+    file: Mapping[str, str]
+    path: Path | None = None
+
+    @classmethod
+    def load(cls, path: Path | None = None,
+             environ: Mapping[str, str] | None = None) -> LiteratureConfig:
+        path = path or literature_env_path()
+        return cls(dict(os.environ if environ is None else environ), _read_key_file(path), path)
+
+    def lookup(self, *names: str) -> tuple[str, str] | tuple[None, None]:
+        """``(value, "env" | "file")`` for the first name set; the environment wins."""
+        for source, values in (("env", self.env), ("file", self.file)):
+            for name in names:
+                if value := values.get(name):
+                    return value, source
+        return None, None
+
+    def get(self, *names: str) -> str | None:
+        return self.lookup(*names)[0]
+
+    def interval(self, name: str, default: float) -> float:
+        raw = self.get(name)
+        try:
+            return float(raw) if raw else default
+        except ValueError:
+            return default
+
+    def key_status(self) -> dict[str, str]:
+        """Which keys are configured and where from (``"env"``/``"file"``/``"no"``)."""
+        return {"semantic_scholar": self.lookup(*S2_KEY_NAMES)[1] or "no",
+                "openalex": self.lookup(*OPENALEX_KEY_NAMES)[1] or "no"}
+
+
+def _retry_after(resp: httpx2.Response) -> float | None:
+    """Seconds from a ``Retry-After`` header (delta-seconds or HTTP date), capped."""
+    raw = (resp.headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError):
+            return None
+        seconds = when.timestamp() - time.time()
+    return min(max(seconds, 0.0), RETRY_AFTER_CAP)
 
 
 def _arxiv_from(text: str | None) -> str | None:
@@ -150,23 +244,41 @@ class Literature:
     """Search and look up papers across the open sources."""
 
     def __init__(self, get: Getter = _http_get, retries: int = 2,
-                 backoff_seconds: float = 2.0) -> None:
+                 backoff_seconds: float = 2.0, *, config: LiteratureConfig | None = None,
+                 limiters: Mapping[str, RateLimiter] | None = None) -> None:
+        """``limiters`` maps a source name to its pacer; by default real HTTP is paced
+        machine-wide (Semantic Scholar, arXiv) and an injected ``get`` is not."""
         self._get, self.retries, self.backoff = get, retries, backoff_seconds
-        self.openalex_key = _env("TARLAB_OPENALEX_API_KEY", "OPENALEX_API_KEY")
-        self.openalex_mailto = _env("TARLAB_OPENALEX_MAILTO")
-        self.s2_key = _env("TARLAB_S2_API_KEY", "SEMANTIC_SCHOLAR_API_KEY")
+        self.config = config or LiteratureConfig.load()
+        self.openalex_key = self.config.get(*OPENALEX_KEY_NAMES)
+        self.openalex_mailto = self.config.get("TARLAB_OPENALEX_MAILTO")
+        self.s2_key = self.config.get(*S2_KEY_NAMES)
+        if limiters is None:
+            limiters = {} if get is not _http_get else {
+                "semantic_scholar": RateLimiter(
+                    "s2", self.config.interval("TARLAB_S2_MIN_INTERVAL", S2_MIN_INTERVAL)),
+                "arxiv": RateLimiter(
+                    "arxiv", self.config.interval("TARLAB_ARXIV_MIN_INTERVAL",
+                                                  ARXIV_MIN_INTERVAL))}
+        self.limiters = dict(limiters)
 
     async def _json(self, url: str, params: Mapping[str, Any],
-                    headers: Mapping[str, str] | None = None) -> Any:
-        resp = await self._fetch(url, params, headers)
+                    headers: Mapping[str, str] | None = None, source: str | None = None
+                    ) -> Any:
+        resp = await self._fetch(url, params, headers, source)
         try:
             return resp.json()
         except ValueError as exc:
             raise SourceError(f"invalid JSON from {url}: {resp.text[:200]}") from exc
 
     async def _fetch(self, url: str, params: Mapping[str, Any],
-                     headers: Mapping[str, str] | None = None) -> httpx2.Response:
+                     headers: Mapping[str, str] | None = None, source: str | None = None
+                     ) -> httpx2.Response:
+        limiter = self.limiters.get(source) if source else None
         for attempt in range(self.retries + 1):
+            delay = self.backoff * (2 ** attempt)
+            if limiter is not None:
+                await limiter.wait()
             try:
                 resp = await self._get(url, params, headers or {})
             except httpx2.HTTPError as exc:
@@ -176,10 +288,12 @@ class Literature:
                 if resp.status_code == 200:
                     return resp
                 if resp.status_code not in (429, 500, 502, 503, 504) or attempt == self.retries:
-                    hint = " (rate limited; an API key raises the limit)" \
+                    hint = " (rate limited; an API key in literature.env raises the limit)" \
                         if resp.status_code == 429 else ""
                     raise SourceError(f"HTTP {resp.status_code}{hint}: {resp.text[:200]}")
-            await asyncio.sleep(self.backoff * (2 ** attempt))
+                if resp.status_code in (429, 503) and (wait := _retry_after(resp)) is not None:
+                    delay = wait
+            await asyncio.sleep(delay)
         raise SourceError("unreachable")
 
     def _oa_params(self, **params: Any) -> dict[str, Any]:
@@ -212,7 +326,8 @@ class Literature:
         params: dict[str, Any] = {"query": query, "limit": limit, "fields": _S2_FIELDS}
         if year_from or year_to:
             params["year"] = f"{year_from or ''}-{year_to or ''}"
-        data = await self._json(f"{S2}/paper/search", params, self._s2_headers())
+        data = await self._json(f"{S2}/paper/search", params, self._s2_headers(),
+                                "semantic_scholar")
         return [_from_s2(p) for p in data.get("data") or []]
 
     async def arxiv_search(self, query: str, limit: int, year_from: int | None,
@@ -225,7 +340,7 @@ class Literature:
             q += (f" AND submittedDate:[{year_from or 1990}01010000 TO "
                   f"{year_to or 2100}12312359]")
         resp = await self._fetch(ARXIV, {"search_query": q, "max_results": limit,
-                                         "sortBy": "relevance"})
+                                         "sortBy": "relevance"}, source="arxiv")
         root = ET.fromstring(resp.text)
         return [_from_arxiv(e) for e in root.findall("a:entry", _ATOM)]
 
@@ -300,7 +415,7 @@ class Literature:
         if s2_ref:
             try:
                 s2 = _from_s2(await self._json(f"{S2}/paper/{s2_ref}", {"fields": _S2_FIELDS},
-                                               self._s2_headers()))
+                                               self._s2_headers(), "semantic_scholar"))
                 status["semantic_scholar"] = "ok"
                 if paper is None:
                     paper = s2
