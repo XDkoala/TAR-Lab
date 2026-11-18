@@ -1,3 +1,5 @@
+import json
+import shutil
 import subprocess
 import sys
 import threading
@@ -523,3 +525,122 @@ def test_platform_questions_follow_the_charters_chat_language(tmp_path: Path) ->
         q.payload["options"]
     lab.reply(qid, FINISH_YES_EN)
     assert lab.step() == "finished"
+
+
+ENGINE_EXAMPLE = (Path(__file__).resolve().parents[2] / "engines" / "ai-scientist-v3"
+                  / "examples" / "circpack")
+
+
+def steps_until(lab: Lab, cond: Callable[[], bool], limit: int = 12) -> None:
+    for _ in range(limit):
+        if cond():
+            return
+        lab.step()
+    assert cond()
+
+
+def test_engine_order_needs_a_complete_task_then_runs_on_the_engine(tmp_path: Path) -> None:
+    engine = FakeExecutor([WorkResult("done", "best combined_score=2.6", session_id="s")],
+                          name="ai-scientist")
+    bad = {**order("engineer", minutes=35), "kind": "engine", "task_dir": "engine_tasks/pack"}
+    model = FakeModel([decision([bad]), decision(), decision([bad]), decision()])
+    lab, _ = make_lab(tmp_path, model)
+    lab.kernel.executors["ai-scientist"] = engine  # type: ignore[index]
+    steps_until(lab, lambda: len(model.prompts) == 4)  # intake, charter, two decisions
+    [rejected] = lab._events("lab.order_rejected")
+    assert "is not ready" in rejected.payload["reason"] and not lab.ledger.orders()
+    assert "lab.order_rejected" in model.prompts[-1] and "not a directory" in model.prompts[-1]
+
+    shutil.copytree(ENGINE_EXAMPLE, lab.kernel.project.workspace / "engine_tasks" / "pack")
+    lab.say("task ready")
+    steps_until(lab, lambda: any(st.status == "done" for st in lab.ledger.orders().values()))
+    [st] = lab.ledger.orders().values()
+    ws = lab.kernel.project.workspace
+    assert st.order.executor == "ai-scientist" and st.order.role == "engineer" and engine.seen
+    assert st.order.params["task_dir"] == str((ws / "engine_tasks" / "pack").resolve())
+    assert st.order.params["results_root"] == str(ws / "engine_runs")
+    assert st.order.params["overrides"]["investigation.execution.max_idea_cycles"] == 3
+
+
+@dataclass
+class TamperingExecutor(FakeExecutor):
+    """Runs the final evaluation; the first run also edits a frozen file."""
+
+    tamper: list[bool] = field(default_factory=list)
+
+    def run(self, attempt: Any, emit: Any) -> WorkResult:
+        if self.tamper.pop(0):
+            (attempt.workspace / "code" / "model.py").write_text("tuned = True\n")
+        return super().run(attempt, emit)
+
+
+def test_final_evaluation_is_sealed_checked_and_rerun_only_with_approval(tmp_path: Path) -> None:
+    ex = TamperingExecutor([WorkResult("done", "final: 0.71", session_id="s")] * 2,
+                           tamper=[True, False])
+    final = {**order("engineer"), "kind": "final_eval", "task_dir": ""}
+    model = FakeModel([decision([final]), decision(), decision([final]), decision([final]),
+                       decision(), decision()])
+    lab, sent = make_lab(tmp_path, model, executor=ex)
+    steps_until(lab, lambda: len(model.prompts) == 4)
+    [rejected] = lab._events("lab.order_rejected")
+    assert "eval/final/protocol.md" in rejected.payload["reason"]
+
+    ws = lab.kernel.project.workspace
+    (ws / "eval" / "final").mkdir(parents=True)
+    (ws / "eval" / "final" / "protocol.md").write_text("Run eval.py on held-out seeds 100-109.\n")
+    (ws / "eval" / "final" / "eval.py").write_text("print('eval')\n")
+    (ws / "eval" / "final" / "frozen.txt").write_text("code  # the method\n")
+    (ws / "code").mkdir()
+    (ws / "code" / "model.py").write_text("tuned = False\n")
+    lab.say("eval ready")
+    steps_until(lab, lambda: bool(lab.questions()))  # sealed, ran, verified, rerun asked
+    [sealed] = lab._events("eval.sealed")
+    assert set(sealed.payload["files"]) == {"code/model.py", "eval/final/eval.py",
+                                            "eval/final/frozen.txt", "eval/final/protocol.md"}
+    oid = sealed.order_id
+    assert oid is not None and lab.ledger.orders()[oid].order.params == {"final_eval": True}
+    [check] = lab._events("eval.verified")
+    assert check.payload["changed"] == ["code/model.py"]
+    assert any("封存被改动" in s for s in sent)
+    record = json.loads((ws / "results" / "final" / oid / "SEAL.json").read_text())
+    assert record["changed"] == ["code/model.py"] and record["final_evaluation_number"] == 1
+    assert "CHANGED during the run: code/model.py" in model.prompts[-1]
+
+    [(qid, q)] = lab.questions().items()
+    assert qid.endswith("-rerun") and q.payload["default"] == "不允许重跑"
+    assert len(lab._events("eval.sealed")) == 1 and len(lab.ledger.orders()) == 1
+    lab.reply(qid, "允许重跑（记进账本，论文里披露）")
+    steps_until(lab, lambda: len(lab._events("eval.verified")) == 2
+                and "rerun allowed by the user" in model.prompts[-1])
+    second = lab._events("eval.sealed")[-1]
+    assert second.payload["rerun"] is True and second.order_id == q.payload["order_id"]
+    assert lab._events("eval.verified")[-1].payload["changed"] == []
+
+
+def test_declined_rerun_rejects_the_order(tmp_path: Path) -> None:
+    ex = FakeExecutor([WorkResult("done", "final", session_id="s")])
+    final = {**order("engineer"), "kind": "final_eval", "task_dir": ""}
+    model = FakeModel([decision([final]), decision([final]), decision()])
+    lab, _ = make_lab(tmp_path, model, executor=ex)
+    ws = lab.kernel.project.workspace
+    (ws / "eval" / "final").mkdir(parents=True)
+    (ws / "eval" / "final" / "protocol.md").write_text("Run it once.\n")
+    (ws / "eval" / "final" / "frozen.txt").write_text("eval/final\n")
+    steps_until(lab, lambda: bool(lab.questions()))
+    [(qid, q)] = lab.questions().items()
+    lab.reply(qid, "不允许重跑")
+    steps_until(lab, lambda: len(model.prompts) == 5)
+    [rejected] = lab._events("lab.order_rejected")
+    assert rejected.order_id == q.payload["order_id"] and len(lab._events("eval.sealed")) == 1
+
+
+def test_final_eval_prompt_explains_the_seal() -> None:
+    from tar_lab.agents.roles import render_prompt
+    from tar_lab.core.workorder import Limits, WorkOrder
+
+    wo = WorkOrder("o9-1-engineer", "engineer", "codex", "run it", (), "numbers", Limits(600),
+                   params={"final_eval": True})
+    text = render_prompt(wo)
+    assert "## Sealed final evaluation" in text and "results/final/o9-1-engineer/" in text
+    assert "## Sealed final evaluation" not in render_prompt(
+        WorkOrder("o9-2-engineer", "engineer", "codex", "x", (), "y", Limits(600)))

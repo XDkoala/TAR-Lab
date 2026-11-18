@@ -7,6 +7,7 @@ idempotently in case the loop died halfway through applying it.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import threading
@@ -18,11 +19,13 @@ from typing import Any, Literal
 
 from tar_lab.agents.main_agent import Decision, MainAgent, Question, compact
 from tar_lab.agents.roles import ROLES
+from tar_lab.core import seal
 from tar_lab.core.charter import APPROVAL_POINTS, Charter
 from tar_lab.core.ledger import Event, Ledger
 from tar_lab.core.pricing import Spend, project_spend
 from tar_lab.core.workorder import Limits, WorkOrder
 from tar_lab.i18n import pick
+from tar_lab.integrations.ai_scientist.task import task_problems
 from tar_lab.integrations.cli_agents.process import quota_error
 
 from .kernel import Kernel
@@ -52,6 +55,14 @@ BUDGET_WARN_FRACTION = 0.8
 BUDGET_NO = "不追加，用现有结果收尾"
 BUDGET_NO_EN = "No more budget; wrap up with what we have"
 MAX_PARALLEL_ORDERS = 3
+ENGINE_EXECUTOR = "ai-scientist"
+ENGINE_RUNS = "engine_runs"
+ENGINE_MAX_CYCLES = 20
+ENGINE_MINUTES_PER_CYCLE = 10.0
+RERUN_YES = "允许重跑（记进账本，论文里披露）"
+RERUN_NO = "不允许重跑"
+RERUN_YES_EN = "Allow the rerun (logged and disclosed)"
+RERUN_NO_EN = "No rerun"
 # Roles whose orders may use the GPU run one at a time; the rest run alongside them.
 EXCLUSIVE_ROLES = frozenset({"engineer"})
 
@@ -194,6 +205,8 @@ class Lab:
         self._literature_alerts(charter)
         self._executor_alerts(charter)
         self._budget_replies(charter)
+        self._rerun_replies(charter)
+        self._verify_seals(charter)
         charter = self.charter() or charter
         exhausted = self._budget(charter)
         agent_down = self._agent_executor() in self.kernel.unavailable()
@@ -491,23 +504,25 @@ class Lab:
                 self._notify(f"Project finished: {charter.title}",
                                      decision.final_summary)
             return
-        existing = self.ledger.orders()
+        handled = (set(self.ledger.orders())
+                   | {e.order_id for e in self._events("lab.order_rejected")}
+                   | {e.payload.get("order_id") for e in self._events("user.question")})
         remaining_minutes = (charter.deadline_hours - self._elapsed_hours()) * 60
         for i, o in enumerate(decision.orders, 1):
             oid = f"o{ev.seq}-{i}-{o['role']}"
-            if oid in existing:
+            if oid in handled:
                 continue
             if remaining_minutes <= 1:
-                self.ledger.append("lab.order_rejected", oid, {"reason": "deadline passed"})
+                self._reject(oid, "deadline passed")
                 continue
             minutes = max(1.0, min(float(o["minutes"]), MAX_ORDER_MINUTES, remaining_minutes))
-            executor = self.tiers[ROLES[o["role"]].tier]
-            if executor in self.kernel.unavailable():
-                executor = self.kernel.fallback_for(executor) or executor
-            self.kernel.submit(WorkOrder(
-                oid, o["role"], executor, o["goal"],
-                tuple(o["deliverables"]), o["acceptance"], Limits(int(minutes * 60)),
-                inputs=tuple(o["inputs"])))
+            kind = o.get("kind", "work")
+            if kind == "engine":
+                self._submit_engine(oid, o, minutes)
+            elif kind == "final_eval":
+                self._submit_final_eval(oid, o, minutes, charter)
+            else:
+                self.kernel.submit(self._work_order(oid, o, minutes))
         asked = {e.payload["qid"] for e in self._events("user.question", "lab.question_held")}
         for i, q in enumerate(decision.ask_user, 1):
             qid = f"q{ev.seq}-{i}"
@@ -521,6 +536,135 @@ class Lab:
             self.ledger.append("user.question", None, payload)
             subject = "Approval needed" if q["kind"] == "approval" else "Question"
             self._notify(f"{subject}: {charter.title}", question_text(qid, payload))
+
+    def _reject(self, oid: str, reason: str) -> None:
+        self.ledger.append("lab.order_rejected", oid, {"reason": reason})
+
+    def _work_order(self, oid: str, o: Mapping[str, Any], minutes: float, *, role: str = "",
+                    params: Mapping[str, Any] | None = None) -> WorkOrder:
+        role = role or o["role"]
+        executor = self.tiers[ROLES[role].tier]
+        if executor in self.kernel.unavailable():
+            executor = self.kernel.fallback_for(executor) or executor
+        return WorkOrder(oid, role, executor, o["goal"], tuple(o["deliverables"]),
+                         o["acceptance"], Limits(int(minutes * 60)), inputs=tuple(o["inputs"]),
+                         params=dict(params or {}))
+
+    def _submit_engine(self, oid: str, o: Mapping[str, Any], minutes: float) -> None:
+        """An AI-Scientist-v3 investigation on a task directory an engineer prepared."""
+        ws = self.kernel.project.workspace
+        if ENGINE_EXECUTOR not in self.kernel.executors:
+            return self._reject(oid, "the AI-Scientist-v3 engine is not configured")
+        rel = str(o.get("task_dir", "")).strip()
+        task = (ws / rel).resolve()
+        if not rel or not task.is_relative_to(ws.resolve()):
+            return self._reject(oid, "an engine order needs `task_dir`, a directory inside the "
+                                     "workspace")
+        problems = task_problems(task)
+        if problems:
+            return self._reject(oid, f"engine task `{rel}` is not ready: {'; '.join(problems)}. "
+                                     "Dispatch an engineer order to prepare it first.")
+        cycles = max(1, min(ENGINE_MAX_CYCLES, int(minutes // ENGINE_MINUTES_PER_CYCLE)))
+        self.kernel.submit(WorkOrder(
+            oid, "engineer", ENGINE_EXECUTOR, o["goal"], tuple(o["deliverables"]),
+            o["acceptance"], Limits(int(minutes * 60)), inputs=tuple(o["inputs"]),
+            require_sources=False,
+            params={"task_dir": str(task), "results_root": str(ws / ENGINE_RUNS),
+                    "phases": ["investigation"],
+                    "overrides": {"investigation.execution.max_idea_cycles": cycles,
+                                  "versioning.enabled": False}}))
+
+    def _final_evals(self) -> list[str]:
+        """Final-evaluation orders that ran, run, or will run."""
+        return [oid for oid, st in self.ledger.orders().items()
+                if st.order.params.get("final_eval")
+                and st.status in ("done", "running", "pending", "interrupted")]
+
+    def _submit_final_eval(self, oid: str, o: Mapping[str, Any], minutes: float,
+                           charter: Charter, *, approved: bool = False) -> None:
+        """Seal ``eval/final/`` and the frozen candidate, then run the protocol once. Another
+        final evaluation is looking at the test set again, so only the user can allow it."""
+        ws = self.kernel.project.workspace
+        problems = seal.problems(ws)
+        if problems:
+            return self._reject(oid, f"the final evaluation cannot be sealed: "
+                                     f"{'; '.join(problems)}. Dispatch an engineer order to "
+                                     f"write `{seal.FINAL_DIR}/` first.")
+        earlier = self._final_evals()
+        if earlier and not approved:
+            lang = charter.chat_language
+            qid = f"{oid}-rerun"
+            payload = {"qid": qid, "kind": "approval", "purpose": "final_rerun",
+                       "order_id": oid, "order": dict(o), "minutes": minutes,
+                       "text": pick(lang,
+                                    f"主 Agent 想再跑一次封存的最终评估（之前已经跑过："
+                                    f"{', '.join(earlier)}）。看过最终结果后再评估，相当于"
+                                    "按测试集挑结果，结论会偏乐观。如果允许，这次重跑会记进账本，"
+                                    f"论文里要披露。\n\n理由：{o['goal'][:800]}",
+                                    "The main agent wants to run the sealed final evaluation "
+                                    f"again (already run: {', '.join(earlier)}). Evaluating "
+                                    "again after seeing final results amounts to selecting on "
+                                    "the test set and biases conclusions upwards. If allowed, "
+                                    "the rerun is logged and must be disclosed in the paper."
+                                    f"\n\nReason: {o['goal'][:800]}"),
+                       "options": [pick(lang, RERUN_YES, RERUN_YES_EN),
+                                   pick(lang, RERUN_NO, RERUN_NO_EN)],
+                       "default": pick(lang, RERUN_NO, RERUN_NO_EN)}
+            self.ledger.append("user.question", None, payload)
+            self._notify(f"Approval needed: {charter.title}", question_text(qid, payload))
+            return None
+        self.ledger.append("eval.sealed", oid, {"files": seal.fingerprint(ws),
+                                                "rerun": bool(earlier)})
+        self.kernel.submit(self._work_order(oid, o, minutes, role="engineer",
+                                            params={"final_eval": True}))
+        return None
+
+    def _rerun_replies(self, charter: Charter) -> None:
+        done = {e.payload["qid"] for e in self._events("lab.rerun_answer")}
+        asked = {e.payload["qid"]: e.payload for e in self._events("user.question")
+                 if e.payload.get("purpose") == "final_rerun"}
+        for e in self._events("user.reply"):
+            q = asked.get(e.payload["qid"])
+            if q is None or q["qid"] in done:
+                continue
+            approved = e.payload["answer"].strip() in (RERUN_YES, RERUN_YES_EN)
+            self.ledger.append("lab.rerun_answer", q["order_id"],
+                               {"qid": q["qid"], "approved": approved})
+            if approved:
+                self._submit_final_eval(q["order_id"], q["order"], q["minutes"], charter,
+                                        approved=True)
+            else:
+                self._reject(q["order_id"], "the user did not allow another final evaluation")
+
+    def _verify_seals(self, charter: Charter) -> None:
+        """When a final-evaluation order ends, check that nothing sealed changed and leave
+        the record next to its results, where the analyst and writer will find it."""
+        ws = self.kernel.project.workspace
+        verified = {e.payload["seal_seq"] for e in self._events("eval.verified")}
+        orders = self.ledger.orders()
+        for n, e in enumerate(self._events("eval.sealed"), 1):
+            st = orders.get(e.order_id or "")
+            if e.seq in verified or st is None or not st.terminal:
+                continue
+            changed = seal.changes(e.payload["files"], ws)
+            record = {"order_id": e.order_id, "order_status": st.status,
+                      "final_evaluation_number": n, "rerun": e.payload["rerun"],
+                      "sealed_at": e.ts.isoformat(), "verified_at": self.clock().isoformat(),
+                      "sealed_files": len(e.payload["files"]), "changed": changed}
+            self.ledger.append("eval.verified", e.order_id, {"seal_seq": e.seq, **record})
+            out = ws / seal.RESULTS_DIR / str(e.order_id)
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "SEAL.json").write_text(json.dumps(
+                {**record, "files": e.payload["files"]}, indent=2, ensure_ascii=False),
+                encoding="utf-8")
+            if changed:
+                self._notify(
+                    pick(charter.chat_language, f"最终评估的封存被改动: {charter.title}",
+                         f"Sealed final evaluation changed: {charter.title}"),
+                    pick(charter.chat_language,
+                         f"工单 {e.order_id} 运行期间，下列封存文件被改动，结果需要披露：\n",
+                         f"These sealed files changed while order {e.order_id} ran; the "
+                         "results must say so:\n") + "\n".join(changed[:50]))
 
     def _finish_confirmed(self, seq: int, decision: Decision, charter: Charter) -> bool:
         """Ask once per finishing decision; only an explicit yes (or a timeout default that
@@ -691,6 +835,19 @@ class Lab:
         if held:
             lines.append("## Questions held back by the platform (fix, then ask again)")
             lines += [f"- {e.payload['qid']}: {p}" for e in held for p in e.payload["problems"]]
+        sealed = self._events("eval.sealed")
+        if sealed:
+            checks = {e.payload["seal_seq"]: e.payload for e in self._events("eval.verified")}
+            lines.append("## Sealed final evaluation")
+            for e in sealed:
+                c = checks.get(e.seq)
+                state = ("running" if c is None else
+                         f"ended ({c['order_status']}); sealed files unchanged" if not c["changed"]
+                         else f"ended ({c['order_status']}); CHANGED during the run: "
+                              f"{', '.join(c['changed'][:10])}")
+                lines.append(f"- {e.order_id}: {len(e.payload['files'])} files sealed"
+                             f"{' (rerun allowed by the user)' if e.payload['rerun'] else ''}; "
+                             f"{state}")
         reports = self.kernel.project.workspace / "reports"
         files = sorted(p.name for p in reports.iterdir()) if reports.is_dir() else []
         lines += ["## Files", f"workspace: {self.kernel.project.workspace}",

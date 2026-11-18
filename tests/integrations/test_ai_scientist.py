@@ -4,12 +4,15 @@ from pathlib import Path
 
 import pytest
 
+from tar_lab.core.workorder import Attempt, Limits, WorkOrder
 from tar_lab.integrations.ai_scientist import (
     AIScientistEngine,
+    AIScientistExecutor,
     RunRequest,
     TaskSpec,
     format_override,
     load_run,
+    task_problems,
     write_task_dir,
 )
 
@@ -169,3 +172,53 @@ def test_real_engine_dry_run(tmp_path: Path) -> None:
     assert result.ok, log
     assert str(engine.run_dir(request).resolve()) in log
     assert not (tmp_path / "runs").exists()
+
+
+def test_task_problems_accepts_a_complete_task_and_names_what_is_missing(tmp_path: Path) -> None:
+    assert task_problems(ENGINE_DIR / "examples" / "circpack") == []
+    (tmp_path / "task.md").write_text("Maximise the score.\n")
+    (tmp_path / "program_0").mkdir()
+    (tmp_path / "program_0" / "program_spec.toml").write_text(
+        'code_root = "src"\n[entrypoint]\npath = "program.py"\n')
+    problems = task_problems(tmp_path)
+    assert any("evaluate.py" in p for p in problems)
+    assert any("program_0/src/program.py" in p for p in problems)
+    assert task_problems(tmp_path / "nope") == [f"{tmp_path / 'nope'} is not a directory"]
+
+
+def test_executor_runs_in_the_orders_results_root_with_default_overrides(tmp_path: Path) -> None:
+    engine_dir = tmp_path / "engine"
+    agsci = engine_dir / ".venv" / "bin" / "agsci"
+    agsci.parent.mkdir(parents=True)
+    # A fake engine: writes the run directory the real one would, then echoes its arguments.
+    agsci.write_text("""#!/bin/sh
+task=$(basename "$2")
+for a in "$@"; do case "$a" in
+  run_id=*) rid=${a#run_id=} ;; paths.results_root=*) root=${a#paths.results_root=} ;;
+esac; done
+d="$root/$task/codex/$rid"
+mkdir -p "$d/investigation"
+printf '%s\\n' '{"event": "pipeline_end", "fields": {"status": "completed"}}' \
+  '{"event": "cost_summary", "fields": {"run_total_cost_usd": 0.25}}' > "$d/pipeline_events.jsonl"
+printf '%s' '{"combined_score": 2.5, "correct": true, "program_dir": "/x/program_1",' \
+  ' "entrypoint_path": "src/program.py"}' > "$d/investigation/best_program_manifest.json"
+printf '%s' '{"outcome": "winner"}' > "$d/.investigation_completion.json"
+echo "args=$*"
+""")
+    agsci.chmod(agsci.stat().st_mode | stat.S_IXUSR)
+    executor = AIScientistExecutor(AIScientistEngine(engine_dir, tmp_path / "shared"),
+                                   model="gpt-x", overrides={"container.enabled": True,
+                                                             "agent.reasoning_effort": "medium"})
+    root = tmp_path / "ws" / "engine_runs"
+    order = WorkOrder("o1", "engineer", "ai-scientist", "search", (), "score", Limits(60),
+                      params={"task_dir": str(tmp_path / "circpack"), "results_root": str(root),
+                              "phases": ["investigation"],
+                              "overrides": {"agent.reasoning_effort": "high"}})
+    attempt = Attempt(order, 1, tmp_path / "ws", tmp_path / "att", 60)
+    result = executor.run(attempt, lambda kind, payload: None)
+    args = (tmp_path / "att" / "engine.log").read_text()
+    assert result.status == "done" and result.cost_usd == 0.25
+    assert str(root) in result.deliverables[0] and not (tmp_path / "shared").exists()
+    assert "agent.model=gpt-x" in args and "container.enabled=true" in args
+    assert "agent.reasoning_effort=high" in args and "medium" not in args
+    assert "outcome=winner" in result.summary and "/x/program_1/src/program.py" in result.summary

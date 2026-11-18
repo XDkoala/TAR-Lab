@@ -33,6 +33,8 @@ ORDER_SCHEMA = _obj({
     "role": {"type": "string", "enum": sorted(ROLES)},
     "goal": _STR, "deliverables": _STRS, "acceptance": _STR,
     "minutes": {"type": "number"}, "inputs": _STRS,
+    "kind": {"type": "string", "enum": ["work", "engine", "final_eval"]},
+    "task_dir": _STR,
 })
 ASK_SCHEMA = _obj({"kind": {"type": "string", "enum": ["question", "approval"]},
                    "point": {"type": "string", "enum": ["none", *APPROVAL_POINTS]},
@@ -94,6 +96,24 @@ Rules:
   reads first. Tag each approval question with the charter approval point it gates in
   `point` ("none" otherwise). The platform puts the summary at the top of a "topic" question
   and holds the question back, waking you with the reason, while either is missing.
+- Order kinds (`kind`): "work" is a normal order for the role. "engine" runs the
+  AI-Scientist-v3 engine on `task_dir`: coding agents propose ideas, implement them and keep
+  the program that scores best on the task's evaluator, for `minutes` (about one idea per 10
+  minutes). Use it for sub-problems with an automatic score worth searching over (a method
+  variant, an architecture or hyperparameter search, beating a baseline on a benchmark), not
+  for analysis questions without a score to improve. First dispatch an engineer "work" order
+  that builds the task directory (see the engineer's guide); the platform rejects an engine
+  order whose task is incomplete. Engine runs use the CPU only (Docker, no GPU); the engine
+  scores on its own evaluator, so the result is a candidate for the final evaluation, not a
+  final number. Leave `task_dir` empty for other kinds.
+- Sealed final evaluation: the plan fixes, before development starts, a held-out split or
+  seeds and a protocol that development never touches. When the candidate methods are
+  frozen, an engineer writes `eval/final/protocol.md`, the script and `eval/final/frozen.txt`
+  (paths of the code, configs and checkpoints to evaluate); then dispatch a "final_eval"
+  order. The platform fingerprints all of it, the order runs the protocol once into
+  `results/final/<order id>/`, and any change to sealed files is reported. Headline numbers
+  in the paper come only from there. A second final evaluation needs the user's approval
+  (the platform asks) and is disclosed; prefer reporting the first one honestly.
 - If the research direction fails, scale the recovery to the remaining time and budget:
   explore two or three alternative directions in parallel (separate designer orders),
   review them, and offer the user a choice. Giving up on the charter's goal is the user's

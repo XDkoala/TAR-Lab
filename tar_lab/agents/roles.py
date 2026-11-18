@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from tar_lab.core import seal
 from tar_lab.core.workorder import WorkOrder
 
 from .guides import GUIDES
@@ -106,6 +107,15 @@ def render_prompt(order: WorkOrder, *, resume: bool = False,
     lines += tools
     if role.name in GUIDES:
         lines += ["", "## How to work", GUIDES[role.name]]
+    if order.params.get("final_eval"):
+        lines += ["", "## Sealed final evaluation", (
+            f"This is the project's sealed final evaluation. `{seal.FINAL_DIR}/` and every path "
+            f"in `{seal.FROZEN}` were fingerprinted when this order was dispatched and are "
+            f"checked again when it ends. Follow `{seal.PROTOCOL}` exactly, once. Do not edit "
+            "anything sealed, and do not tune, select or rerun to improve numbers. Write all "
+            f"outputs to `{seal.RESULTS_DIR}/{order.id}/`. If the protocol cannot run as "
+            "written, stop and report `needs_help` instead of changing it. Report every number "
+            "it produced, including bad ones.")]
     if order.require_sources:
         lines += ["", "## Sources",
                   ("Base key design decisions on existing papers or code and list them in "

@@ -124,11 +124,26 @@ def _engine(name: str) -> AIScientistEngine:
     return AIScientistEngine(REPO_ROOT / "engines" / name, runs, workspace / ".tools" / "node")
 
 
+def _engine_overrides() -> dict[str, str | int | float | bool]:
+    """How engine work orders run unless the order says otherwise: Codex on the subscription
+    inside the engine's Docker image (the setup used for the Project A baseline). Docker has
+    no GPU runtime here, so engine orders evaluate on the CPU."""
+    env_file = REPO_ROOT / "deploy" / "local" / "env" / "codex-subscription.env"
+    overrides: dict[str, str | int | float | bool] = {
+        "agent.reasoning_effort": "medium", "container.enabled": True,
+        "container.image": os.environ.get("TARLAB_ENGINE_IMAGE",
+                                          "agentic-scientist/agent-cli:codex-0.169.0")}
+    if env_file.is_file():
+        overrides["container.env_file"] = str(env_file)
+    return overrides
+
+
 def _executors() -> dict[str, Executor]:
     return {
         "codex": CodexExecutor(),
         "devin": DevinExecutor(),
-        "ai-scientist": AIScientistExecutor(_engine("ai-scientist-v3")),
+        "ai-scientist": AIScientistExecutor(_engine("ai-scientist-v3"), model=CodexExecutor().model,
+                                            overrides=_engine_overrides()),
         "ai-scientist-original": AIScientistExecutor(
             _engine("ai-scientist-v3-original"), name="ai-scientist-original"),
     }

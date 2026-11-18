@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -50,3 +51,28 @@ def write_task_dir(spec: TaskSpec, parent: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
     return task_dir
+
+
+def task_problems(task_dir: Path) -> list[str]:
+    """What keeps ``task_dir`` from running the engine's ``investigation`` phase directly:
+    ``task.md``, an ``evaluate.py`` and a ``program_0`` scaffold whose entrypoint exists."""
+    task_dir = Path(task_dir)
+    if not task_dir.is_dir():
+        return [f"{task_dir} is not a directory"]
+    problems = []
+    md = task_dir / "task.md"
+    if not md.is_file() or not md.read_text(encoding="utf-8", errors="replace").strip():
+        problems.append("task.md is missing or empty")
+    if not (task_dir / "evaluate.py").is_file():
+        problems.append("evaluate.py is missing")
+    spec_path = task_dir / "program_0" / "program_spec.toml"
+    try:
+        spec = tomllib.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        problems.append(f"program_0/program_spec.toml is missing or invalid ({exc})")
+    else:
+        entry = Path(str(spec.get("code_root", "src"))) / str(
+            spec.get("entrypoint", {}).get("path", ""))
+        if not (task_dir / "program_0" / entry).is_file():
+            problems.append(f"the entrypoint program_0/{entry.as_posix()} does not exist")
+    return problems

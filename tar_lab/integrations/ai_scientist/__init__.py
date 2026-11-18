@@ -7,7 +7,7 @@ it never imports engine code.
 from .engine import PIPELINE_PHASES, AIScientistEngine, EngineRun, RunRequest, format_override
 from .executor import AIScientistExecutor
 from .results import PhaseResult, RunSummary, load_run
-from .task import TaskSpec, write_task_dir
+from .task import TaskSpec, task_problems, write_task_dir
 
 __all__ = [
     "PIPELINE_PHASES",
@@ -20,5 +20,6 @@ __all__ = [
     "TaskSpec",
     "format_override",
     "load_run",
+    "task_problems",
     "write_task_dir",
 ]
