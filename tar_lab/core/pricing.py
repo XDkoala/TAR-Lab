@@ -14,6 +14,9 @@ MAIN_AGENT_USAGE = frozenset({"pi.decision", "intake.answers", "project.charter"
 # Source: https://developers.openai.com/api/docs/models/gpt-6.1-sol (checked 2026-11-17).
 PRICES: dict[str, tuple[float, float, float]] = {
     "gpt-6.1-sol": (2.00, 0.10, 10.00),
+    # Source: `devin models` (Devin CLI 3000.14, checked 2026-11-21).
+    "claude-opus-5-5-medium": (4.00, 0.20, 20.00),
+    "claude-sonnet-5-5-medium": (2.00, 0.10, 10.00),
 }
 
 

@@ -35,7 +35,7 @@ _GIT_ID = ("-c", "user.name=TAR-Lab", "-c", "user.email=tar-lab@localhost")
 # every snapshot copy gigabytes into git; they are listed in the ledger instead.
 SNAPSHOT_SKIP_DIRS = frozenset({".git", ".venv", "venv", ".cache", "__pycache__", "node_modules",
                                 ".mypy_cache", ".pytest_cache", ".ruff_cache",
-                                ".ipynb_checkpoints"})
+                                ".ipynb_checkpoints", ".devin"})
 SNAPSHOT_MAX_FILE_BYTES = 10 * 1024 * 1024
 # How long an executor that reported an exhausted quota or rate limit is left alone.
 EXECUTOR_COOLDOWN = timedelta(minutes=30)

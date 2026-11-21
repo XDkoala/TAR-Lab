@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from tar_lab.agents.main_agent import Decision, MainAgent, Question, compact
 from tar_lab.agents.roles import ROLES
-from tar_lab.core import seal
+from tar_lab.core import preflight, seal
 from tar_lab.core.charter import APPROVAL_POINTS, Charter
 from tar_lab.core.ledger import Event, Ledger
 from tar_lab.core.pricing import Spend, project_spend
@@ -85,6 +85,8 @@ class Lab:
     # Ending a project is the user's decision: ``finish`` becomes a confirmation question.
     confirm_finish: bool = True
     max_parallel: int = MAX_PARALLEL_ORDERS
+    # Check each stage's host tools before dispatching it (tar_lab.core.preflight).
+    check_requirements: bool = False
     _workers: dict[str, threading.Thread] = field(default_factory=dict, init=False, repr=False)
     _recovered: bool = field(default=False, init=False, repr=False)
 
@@ -193,6 +195,7 @@ class Lab:
         if not busy and not self._recovered:
             self.kernel.recover()  # only orders left by a previous, dead loop
             self._recovered = True
+            self._preflight_report(charter)
         # Timers first: a timeout default that confirms finishing is applied in the same step.
         if self._timers(charter) == "suspended":
             return "suspended"
@@ -521,6 +524,9 @@ class Lab:
                 self._submit_engine(oid, o, minutes)
             elif kind == "final_eval":
                 self._submit_final_eval(oid, o, minutes, charter)
+            elif (missing := self._missing_tools(o["role"])):
+                self._reject(oid, f"the {o['role']} stage cannot run on this machine: "
+                                  + "; ".join(missing))
             else:
                 self.kernel.submit(self._work_order(oid, o, minutes))
         asked = {e.payload["qid"] for e in self._events("user.question", "lab.question_held")}
@@ -536,6 +542,36 @@ class Lab:
             self.ledger.append("user.question", None, payload)
             subject = "Approval needed" if q["kind"] == "approval" else "Question"
             self._notify(f"{subject}: {charter.title}", question_text(qid, payload))
+
+    def _requirements(self) -> list[preflight.Requirement]:
+        roles_on: dict[str, frozenset[str]] = {}
+        for role, card in ROLES.items():
+            name = self.tiers[card.tier]
+            roles_on[name] = roles_on.get(name, frozenset()) | {role}
+        executors = set(roles_on)
+        agent = self._agent_executor()
+        if agent in ("codex", "devin"):
+            executors.add(agent)
+            roles_on[agent] = preflight.ALL_ROLES  # the main agent decides for every stage
+        return preflight.requirements(executors, roles_on)
+
+    def _preflight_report(self, charter: Charter) -> None:
+        """Once per loop process: record every requirement and tell the user what is
+        missing, before any stage needs it."""
+        if not self.check_requirements:
+            return
+        findings = preflight.run(self._requirements())
+        self.ledger.append("lab.preflight", None, {"findings": [f.line() for f in findings]})
+        problems = [f.line() for f in findings if not f.ok]
+        if problems:
+            self._notify(pick(charter.chat_language, f"运行环境缺少工具：{charter.title}",
+                              f"Missing tools: {charter.title}"),
+                         "\n".join(problems))
+
+    def _missing_tools(self, role: str) -> list[str]:
+        if not self.check_requirements:
+            return []
+        return [f.line() for f in preflight.blocking(preflight.run(self._requirements(), role))]
 
     def _reject(self, oid: str, reason: str) -> None:
         self.ledger.append("lab.order_rejected", oid, {"reason": reason})

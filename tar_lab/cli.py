@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +23,7 @@ from .core.machine import describe
 from .core.workorder import Executor, Limits, McpServer, WorkOrder
 from .integrations.ai_scientist import AIScientistEngine, AIScientistExecutor, load_run
 from .integrations.cli_agents.codex import CodexExecutor, find_codex
-from .integrations.cli_agents.devin import DevinExecutor
+from .integrations.cli_agents.devin import DevinExecutor, find_devin
 from .integrations.undermind import (
     FileTokenStorage,
     LoginRequiredError,
@@ -183,15 +183,44 @@ def _kernel(root: Path) -> Kernel:
 
 def _fallbacks() -> dict[str, str]:
     """``TARLAB_FALLBACK=codex=devin,devin=codex``: executor to use when one is out of quota.
-    Off by default: a fallback may bill beyond its plan (Devin charges extra usage)."""
-    pairs = (item.split("=", 1) for item in os.environ.get("TARLAB_FALLBACK", "").split(","))
+    Default ``devin=codex``: Devin's weekly quota is the scarce one and Codex bills nothing
+    extra; ``codex=devin`` stays off because Devin charges extra usage beyond its plan. Set
+    ``TARLAB_FALLBACK=none`` to wait for quotas to reset instead."""
+    raw = os.environ.get("TARLAB_FALLBACK", "devin=codex")
+    pairs = (item.split("=", 1) for item in raw.split(","))
     return {a.strip(): b.strip() for a, *rest in pairs for b in rest if a.strip() and b.strip()}
+
+
+DEFAULT_TIERS = {"high": "devin", "medium": "codex", "low": "codex"}
+
+
+def _tiers(executors: Mapping[str, object]) -> dict[str, str]:
+    """Executor per difficulty tier: high-tier roles (designer, reviewer) on Devin, the rest
+    on Codex. ``TARLAB_TIERS=high=codex`` overrides; without a Devin CLI, high falls back to
+    Codex with a warning."""
+    tiers = dict(DEFAULT_TIERS)
+    for item in os.environ.get("TARLAB_TIERS", "").split(","):
+        tier, _, name = item.partition("=")
+        if tier.strip() in tiers and name.strip():
+            tiers[tier.strip()] = name.strip()
+    for tier, name in tiers.items():
+        if name not in executors:
+            raise SystemExit(f"TARLAB_TIERS: unknown executor {name!r} for tier {tier}")
+    if "devin" in tiers.values():
+        try:
+            find_devin()
+        except FileNotFoundError:
+            print("Warning: devin CLI not found (set TARLAB_DEVIN_BIN); high-tier roles run on "
+                  "codex.", file=sys.stderr)
+            tiers = {t: "codex" if n == "devin" else n for t, n in tiers.items()}
+    return tiers
 
 
 def _lab(root: Path) -> Lab:
     kernel = _kernel(root)
     agent = MainAgent(CodexExecutor(), kernel.project.root, describe(kernel.project.root))
-    return Lab(kernel, agent, default_notifier())
+    return Lab(kernel, agent, default_notifier(), tiers=_tiers(kernel.executors),
+               check_requirements=True)
 
 
 def _ask(q: Question) -> str:
@@ -467,7 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = um.add_parser("serve", help="stdio MCP proxy scoped to one project (for agents)")
     serve.add_argument("--ledger", type=Path, required=True)
-    serve.add_argument("--order")
+    serve.add_argument("--order", default=os.environ.get("TARLAB_ORDER_ID"))
     um.add_parser("workspace", help="create the project's Undermind workspace").add_argument(
         "project", type=Path)
 
@@ -475,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
                             ).add_subparsers(dest="command", required=True)
     lit_serve = lit.add_parser("serve", help="stdio MCP server for agents")
     lit_serve.add_argument("--ledger", type=Path)
-    lit_serve.add_argument("--order")
+    lit_serve.add_argument("--order", default=os.environ.get("TARLAB_ORDER_ID"))
     lit_search = lit.add_parser("search", help="search OpenAlex, Semantic Scholar and arXiv")
     lit_search.add_argument("query")
     lit_search.add_argument("--limit", type=int, default=10)
@@ -484,6 +513,14 @@ def build_parser() -> argparse.ArgumentParser:
     lit_status.add_argument("--online", action="store_true",
                             help="make one minimal request per source")
     lit_status.add_argument("--json", action="store_true")
+
+    groups.add_parser("doctor", help="check the host tools every stage needs (git, agent "
+                      "CLIs, TeX Live, poppler, figures environment, ...)")
+    dv = groups.add_parser("devin", help="Devin CLI (high-tier executor)").add_subparsers(
+        dest="command", required=True)
+    dv_usage = dv.add_parser("usage", help="plan quota left (reads the interactive /usage "
+                             "panel; no model call)")
+    dv_usage.add_argument("--json", action="store_true", help="print JSON")
 
     engine = groups.add_parser("engine", help="AI-Scientist-v3 engine").add_subparsers(
         dest="command", required=True)
@@ -638,6 +675,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         _print_json(anyio.run(Literature().search, args.query, args.limit, args.year_from))
         return 0
+    if args.group == "doctor":
+        from .core import preflight
+        from .orchestration.lab import ROLES
+
+        tiers = _tiers(_executors())
+        roles_on: dict[str, frozenset[str]] = {"codex": preflight.ALL_ROLES}  # main agent
+        for role, card in ROLES.items():
+            roles_on[tiers[card.tier]] = roles_on.get(tiers[card.tier], frozenset()) | {role}
+        findings = preflight.run(preflight.requirements(roles_on, roles_on))
+        print(f"Tiers: {', '.join(f'{t}={n}' for t, n in tiers.items())}")
+        print("\n".join(f.line() for f in findings))
+        return 1 if preflight.blocking(findings) else 0
+    if args.group == "devin":
+        from .integrations.cli_agents.devin import read_quota
+
+        quota = read_quota()
+        if args.json:
+            _print_json(quota)
+        elif not quota:
+            print("Could not read the quota (is `devin auth status` logged in?)",
+                  file=sys.stderr)
+        for period, q in quota.items():
+            if not args.json:
+                print(f"{period}: {q['used_percent']:g}% used, "
+                      f"{100 - q['used_percent']:g}% left"
+                      + (f", resets in {q['resets_in']}" if q["resets_in"] else ""))
+        return 0 if quota else 1
     if args.group == "tex":
         if args.command == "check":
             from .tools.paper_check import check_paper
