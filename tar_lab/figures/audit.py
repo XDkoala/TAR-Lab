@@ -48,6 +48,11 @@ def artifact_check(workspace: Path, paper_dir: Path, rebuild: bool = True) -> Ch
             issues.append(f"{artifact.id}: {artifact.script} changed since the last build")
         if set(entry["inputs"]) != set(artifact.inputs):
             issues.append(f"{artifact.id}: inputs in the spec changed since the last build")
+        explicit_font = spec.layout.get("font")
+        if entry.get("methods", []) != spec.methods or (
+                explicit_font and entry.get("font") != explicit_font):
+            issues.append(f"{artifact.id}: [layout] font or [style] methods changed since the "
+                          "last build")
         for path, sha in entry["inputs"].items():
             if not (workspace / path).exists():
                 issues.append(f"{artifact.id}: input {path} no longer exists")
@@ -88,7 +93,7 @@ def artifact_check(workspace: Path, paper_dir: Path, rebuild: bool = True) -> Ch
     return Check("generated artifacts", FAIL if issues else PASS, summary, issues)
 
 
-def size_check(workspace: Path, tex: str, layout: dict[str, float] | None) -> Check:
+def size_check(workspace: Path, tex: str, layout: dict[str, Any] | None) -> Check:
     prov = fb.load_provenance(workspace) or {}
     figures = {i: e for i, e in prov.get("artifacts", {}).items() if e["kind"] == "figure"}
     if not figures:
@@ -97,7 +102,13 @@ def size_check(workspace: Path, tex: str, layout: dict[str, float] | None) -> Ch
     if layout is None:
         issues.append("could not measure \\columnwidth/\\textwidth from the paper")
     else:
+        explicit_font = fb.load_spec(workspace).layout.get("font")
+        body = layout.get("body_font")
         for ident, entry in figures.items():
+            if body and not explicit_font and entry.get("font") != body:
+                issues.append(f"{ident}: drawn in the {entry.get('font')} font but the body "
+                              f"text is {body} ({layout.get('rmdefault')}); rerun `tarlab "
+                              "figures build`")
             key = {"column": "columnwidth_in", "text": "textwidth_in"}.get(entry["width"])
             if key is None:
                 continue

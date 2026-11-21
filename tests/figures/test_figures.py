@@ -70,13 +70,27 @@ def test_booktabs_and_formatting() -> None:
     tex = tf.booktabs(["Method", "x"], [["a_b", 1.234], tf.MIDRULE, [tf.bold("c"), None]],
                       groups=[("", 1), ("Group", 1)], digits=1)
     assert tex.splitlines() == [
-        r"\begin{tabular}{lr}", r"\toprule", r" & Group \\", r"\cmidrule(lr){2-2}",
+        r"\begin{tabular}{@{}lr@{}}", r"\toprule", r" & Group \\", r"\cmidrule(lr){2-2}",
         r"Method & x \\", r"\midrule", r"a\_b & 1.2 \\", r"\midrule",
         r"\textbf{c} & -- \\", r"\bottomrule", r"\end{tabular}"]
     with pytest.raises(ValueError):
         tf.booktabs(["a", "b"], [["only one"]])
+    with pytest.raises(ValueError, match="tf.Raw"):
+        tf.booktabs([r"95\% CI"], [])
+    assert tf.booktabs(["95% CI"], [], tight=False).splitlines()[:3] == [
+        r"\begin{tabular}{l}", r"\toprule", r"95\% CI \\"]
+    assert tf.fmt(92454400, 0, thousands=True) == "92,454,400"
+    assert tf.interval(0.117425, 0.119421, 3, scale=1000) == "[117.425,119.421]"
     with pytest.raises(ValueError):
         tf.booktabs(["a", "b"], [], groups=[("g", 3)])
+
+
+def test_method_style(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TARLAB_FIG_ARTIFACT", json.dumps({"methods": ["W", "D"]}))
+    assert tf.method_style("D") == {"color": tf.COLORS[1], "marker": tf.MARKERS[1],
+                                    "linestyle": tf.LINESTYLES[1]}
+    with pytest.raises(ValueError, match="not in"):
+        tf.method_style("RS")
 
 
 def test_load_spec_errors(tmp_path: Path) -> None:
@@ -105,6 +119,10 @@ def test_layout_probe(tmp_path: Path) -> None:
     assert fb.parse_layout("TARLAB-LAYOUT columnwidth=252.0pt;textwidth=516.0pt") == {
         "columnwidth_in": 3.4869, "textwidth_in": 7.1399}
     assert fb.parse_layout("nothing") is None
+    probe = ("TARLAB-LAYOUT columnwidth=252.0pt;textwidth=516.0pt;rm={};sf=phv;family={};")
+    assert (fb.parse_layout(probe.format("ptm", "ptm")) or {})["body_font"] == "serif"
+    assert (fb.parse_layout(probe.format("lmr", "lmr")) or {})["body_font"] == "cm"
+    assert (fb.parse_layout(probe.format("cmr", "phv")) or {})["body_font"] == "sans"
     (tmp_path / "x.tex").write_text("no document")
     assert not fb.insert_layout_probe(tmp_path / "x.tex")
 
@@ -133,6 +151,11 @@ def test_build_records_provenance_and_audit_detects_drift(tmp_path: Path,
 
     assert fb.build(ws, ws / "paper").ok
     assert audit.artifact_check(ws, ws / "paper").status == PASS
+    spec_path = ws / "figures" / "spec.toml"
+    spec_path.write_text(spec_path.read_text() + '\n[style]\nmethods = ["B", "A_base"]\n')
+    check = audit.artifact_check(ws, ws / "paper")
+    assert any("[style] methods changed" in d for d in check.details)
+    assert fb.build(ws, ws / "paper").ok
     (ws / "figures" / "spec.toml").write_text(
         (ws / "figures" / "spec.toml").read_text().replace('id = "main"', 'id = "renamed"'))
     assert fb.build(ws, ws / "paper").ok
@@ -192,7 +215,7 @@ def test_size_check(tmp_path: Path, stdlib_python: None) -> None:
     (ws / "figures" / "out" / "provenance.json").write_text(json.dumps({"artifacts": {
         "curve": {"kind": "figure", "width": "column", "width_in": 3.5},
         "wide": {"kind": "figure", "width": "text", "width_in": 7.14}}}))
-    layout = {"columnwidth_in": 3.3, "textwidth_in": 7.14}
+    layout: dict[str, object] = {"columnwidth_in": 3.3, "textwidth_in": 7.14}
     tex = ("\\includegraphics{generated/curve}\\includegraphics[width=\\textwidth]"
            "{generated/wide}\\includegraphics[width=0.5\\linewidth]{generated/curve.pdf}"
            "\\includegraphics[scale=0.5]{other}")
@@ -205,6 +228,9 @@ def test_size_check(tmp_path: Path, stdlib_python: None) -> None:
         "size, include them without scaling")]
     layout["columnwidth_in"] = 3.5
     assert audit.size_check(ws, "\\includegraphics{generated/curve}", layout).status == PASS
+    layout["body_font"] = "cm"
+    check = audit.size_check(ws, "", layout)
+    assert check.status == WARN and "drawn in the None font but the body" in check.details[0]
 
 
 @pytest.mark.skipif(fb.figures_python() is None or find_texlive_bin() is None
@@ -222,7 +248,7 @@ def test_real_figures_and_check(tmp_path: Path, capsys: pytest.CaptureFixture[st
         "\\input{generated/main}\\end{table}\n\\end{document}\n")
     assert main(["figures", "build", "--workspace", str(ws)]) == 0
     out = capsys.readouterr().out
-    assert "measured from paper/main.tex" in out
+    assert "font cm (measured from paper/main.tex)" in out
     assert main(["tex", "check", str(ws / "paper"), "--json"]) == 0
     report = json.loads(capsys.readouterr().out)
     statuses = {c["name"]: c["status"] for c in report["checks"]}

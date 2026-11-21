@@ -15,6 +15,9 @@ and table script::
 
     tf.save_table(tf.booktabs(["Method", "Success (%)"], rows))
 
+For a legend outside the axes use ``ax.legend(loc="lower left", bbox_to_anchor=(0, 1.02),
+ncol=4)`` (constrained layout makes room) or ``fig.legend(..., loc="outside upper center")``.
+
 Figures are drawn at their exact final width with fonts close to the paper's body text, so
 they are included at natural size (``\\includegraphics{generated/<id>}``) and their text
 keeps its drawn size. Matplotlib is imported lazily: the table helpers need only the standard
@@ -125,16 +128,27 @@ def mean_ci(values: Iterable[float], level: float = 0.95) -> tuple[float, float]
     return mean, float(stats.t.ppf(0.5 + level / 2, len(xs) - 1)) * std / math.sqrt(len(xs))
 
 
-def fmt(value: float | None, digits: int = 2, percent: bool = False) -> str:
-    """Fixed-point number; ``--`` for missing values."""
+def fmt(value: float | None, digits: int = 2, percent: bool = False, scale: float = 1.0,
+        thousands: bool = False) -> str:
+    """Fixed-point ``value * scale`` (``percent`` = scale 100; e.g. ``scale=1000`` for seconds
+    shown as ms); ``thousands`` adds ``,`` separators; ``--`` for missing values."""
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return "--"
-    return f"{value * 100 if percent else value:.{digits}f}"
+    x = value * (100 if percent else scale)
+    return f"{x:,.{digits}f}" if thousands else f"{x:.{digits}f}"
 
 
-def fmt_pm(mean: float, spread: float, digits: int = 2, percent: bool = False) -> Raw:
+def fmt_pm(mean: float, spread: float, digits: int = 2, percent: bool = False,
+           scale: float = 1.0) -> Raw:
     """``mean $\\pm$ spread`` with the same number of decimals."""
-    return Raw(f"{fmt(mean, digits, percent)} $\\pm$ {fmt(spread, digits, percent)}")
+    return Raw(f"{fmt(mean, digits, percent, scale)} $\\pm$ "
+               f"{fmt(spread, digits, percent, scale)}")
+
+
+def interval(lo: float, hi: float, digits: int = 2, percent: bool = False,
+             scale: float = 1.0) -> str:
+    """``[lo,hi]`` with the same number of decimals."""
+    return f"[{fmt(lo, digits, percent, scale)},{fmt(hi, digits, percent, scale)}]"
 
 
 # --- tables ------------------------------------------------------------------------------
@@ -153,6 +167,9 @@ def escape(text: str) -> str:
 def _cell(value: Any, digits: int) -> str:
     if isinstance(value, Raw):
         return str(value)
+    if isinstance(value, str) and "\\" in value:
+        raise ValueError(f"cell {value!r} looks like LaTeX; wrap it in tf.Raw(...) (plain "
+                         "strings are escaped, so '\\%' would print a backslash)")
     if value is None:
         return "--"
     if isinstance(value, bool):
@@ -170,11 +187,14 @@ def bold(value: Any, digits: int = 2) -> Raw:
 
 def booktabs(header: Sequence[Any], rows: Sequence[Sequence[Any] | str], *,
              align: str | None = None, groups: Sequence[tuple[str, int]] | None = None,
-             digits: int = 2) -> str:
+             digits: int = 2, tight: bool = True) -> str:
     """A ``tabular`` with booktabs rules (needs ``\\usepackage{booktabs}``).
 
-    ``rows`` holds cell lists or :data:`MIDRULE`; floats are printed with ``digits`` decimals,
-    strings are escaped unless wrapped in :class:`Raw` (see :func:`bold`, :func:`fmt_pm`).
+    ``rows`` holds cell lists or :data:`MIDRULE`; floats are printed with ``digits`` decimals.
+    Header and body strings are escaped (``"95% CI"`` prints as written); LaTeX such as
+    ``$N=128$`` or ``\\textbf`` must be wrapped in :class:`Raw` (see :func:`bold`,
+    :func:`fmt_pm`); a plain string with a backslash raises. ``align`` defaults to one ``l``
+    then ``r`` columns; ``tight`` drops the outer column padding (``@{}...@{}``).
     ``groups`` adds a spanning header row, e.g. ``[("", 1), ("Dataset A", 2)]``. The caption
     and label belong in the paper's ``table`` environment, around ``\\input``.
     """
@@ -185,6 +205,8 @@ def booktabs(header: Sequence[Any], rows: Sequence[Sequence[Any] | str], *,
     if groups is not None and sum(span for _, span in groups) != ncols:
         raise ValueError("group spans must add up to the number of columns")
     align = align or "l" + "r" * (ncols - 1)
+    if tight and not align.startswith("@{}"):
+        align = f"@{{}}{align}@{{}}"
     lines = [f"\\begin{{tabular}}{{{align}}}", "\\toprule"]
     if groups:
         cells, rules, col = [], [], 1
@@ -221,6 +243,19 @@ def save_table(tex: str) -> Path:
 
 
 # --- figures -----------------------------------------------------------------------------
+
+
+def method_style(name: str) -> dict[str, Any]:
+    """Colour, marker and line style for a method, stable across every figure: the order
+    comes from ``[style] methods = [...]`` in ``figures/spec.toml``. Use as
+    ``ax.plot(x, y, label=name, **tf.method_style(name))``."""
+    methods = list(artifact().get("methods") or [])
+    if name not in methods:
+        raise ValueError(f"method {name!r} is not in [style] methods = {methods} in "
+                         "figures/spec.toml; list every method once so all figures agree")
+    i = methods.index(name)
+    return {"color": COLORS[i % len(COLORS)], "marker": MARKERS[i % len(MARKERS)],
+            "linestyle": LINESTYLES[i % len(LINESTYLES)]}
 
 
 def style(font: str | None = None, size: float = FONT_SIZE) -> None:

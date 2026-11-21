@@ -3,12 +3,16 @@
 A workspace declares its artifacts in ``figures/spec.toml``::
 
     [layout]                 # optional: measured from paper/main.tex when omitted
-    font = "serif"           # serif (Times-like), cm (Computer Modern) or sans
+    font = "serif"           # serif (Times-like), cm (Computer Modern) or sans; default:
+                             # the paper's body font
+
+    [style]
+    methods = ["A", "B"]     # fixed order: tf.method_style(name) gives each the same look
 
     [[figure]]
     id = "success_curve"
     script = "figures/scripts/success_curve.py"
-    inputs = ["results/final/o12/metrics.json"]
+    inputs = ["results/final/o12/metrics.json"]   # files or directories (all files under it)
     width = "column"         # column, text, or a number of inches
     height_in = 2.0          # optional
     headline = true          # inputs must come from the sealed final evaluation
@@ -116,6 +120,7 @@ class Spec:
     artifacts: list[Artifact]
     layout: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    methods: list[str] = field(default_factory=list)
 
 
 def _relative(workspace: Path, value: Any, what: str, errors: list[str]) -> str | None:
@@ -146,6 +151,12 @@ def load_spec(workspace: Path) -> Spec:
         layout = {}
     if layout.get("font", "serif") not in FONTS:
         errors.append(f"[layout] font must be one of {', '.join(FONTS)}")
+    style = raw.get("style", {})
+    methods = style.get("methods", []) if isinstance(style, dict) else None
+    if not isinstance(methods, list) or not all(isinstance(m, str) for m in methods) or len(
+            set(methods)) != len(methods):
+        errors.append("[style] methods must be a list of distinct names")
+        methods = []
     artifacts: list[Artifact] = []
     seen: set[str] = set()
     for kind in ("figure", "table"):
@@ -189,7 +200,7 @@ def load_spec(workspace: Path) -> Spec:
                                       str(item.get("claim", ""))))
     if not artifacts and not errors:
         errors.append(f"{SPEC} declares no [[figure]] or [[table]]")
-    return Spec(artifacts, layout, errors)
+    return Spec(artifacts, layout, errors, methods)
 
 
 # --- hashing -----------------------------------------------------------------------------
@@ -223,25 +234,44 @@ def insert_layout_probe(main: Path) -> bool:
     if not m:
         return False
     probe = (f"\\typeout{{{LAYOUT_MARK} columnwidth=\\the\\columnwidth;"
-             f"textwidth=\\the\\textwidth}}")
+             f"textwidth=\\the\\textwidth;rm=\\rmdefault;sf=\\sfdefault;"
+             f"family=\\familydefault;}}")
     main.write_text(text[:m.end()] + probe + text[m.end():], encoding="utf-8")
     return True
 
 
-def parse_layout(log_text: str) -> dict[str, float] | None:
-    m = re.search(LAYOUT_MARK + r" columnwidth=([\d.]+)pt;textwidth=([\d.]+)pt", log_text)
+_CM_FAMILIES = ("cmr", "lmr", "cmss", "lmss")
+
+
+def body_font(rm: str, sf: str, family: str) -> str:
+    """The figure font closest to the body text: ``cm`` for Computer/Latin Modern, ``sans``
+    for sans-serif bodies, else ``serif`` (Times-like, as most venue classes use)."""
+    if family == sf and family != rm:
+        return "sans"
+    return "cm" if rm.lower() in _CM_FAMILIES else "serif"
+
+
+def parse_layout(log_text: str) -> dict[str, Any] | None:
+    m = re.search(LAYOUT_MARK + r" columnwidth=([\d.]+)pt;textwidth=([\d.]+)pt"
+                  r"(?:;rm=([^;]*);sf=([^;]*);family=([^;]*);)?", log_text)
     if not m:
         return None
-    return {"columnwidth_in": round(float(m.group(1)) / PT_PER_IN, 4),
-            "textwidth_in": round(float(m.group(2)) / PT_PER_IN, 4)}
+    layout: dict[str, Any] = {"columnwidth_in": round(float(m.group(1)) / PT_PER_IN, 4),
+                              "textwidth_in": round(float(m.group(2)) / PT_PER_IN, 4)}
+    if m.group(3) is not None:
+        layout["rmdefault"] = m.group(3).strip()
+        layout["body_font"] = body_font(m.group(3).strip(), m.group(4).strip(),
+                                        m.group(5).strip())
+    return layout
 
 
 def _preamble_sha(main: Path) -> str:
     text = main.read_text(encoding="utf-8", errors="replace")
-    return hashlib.sha256(re.split(r"\\begin\s*\{document\}", text)[0].encode()).hexdigest()
+    preamble = re.split(r"\\begin\s*\{document\}", text)[0]
+    return hashlib.sha256(("layout-v2\0" + preamble).encode()).hexdigest()
 
 
-def measure_layout(paper_dir: Path, main: str = "main.tex") -> dict[str, float] | None:
+def measure_layout(paper_dir: Path, main: str = "main.tex") -> dict[str, Any] | None:
     """Build a copy of the paper with a probe and read \\columnwidth and \\textwidth."""
     from ..tools.paper_check import copy_sources
 
@@ -257,7 +287,7 @@ def measure_layout(paper_dir: Path, main: str = "main.tex") -> dict[str, float] 
 
 
 def resolve_layout(workspace: Path, spec: Spec, paper_dir: Path | None,
-                   main: str = "main.tex") -> tuple[dict[str, float], str]:
+                   main: str = "main.tex") -> tuple[dict[str, Any], str]:
     """Widths in inches and where they came from (spec, measured paper, or default)."""
     if "columnwidth_in" in spec.layout and "textwidth_in" in spec.layout:
         return ({"columnwidth_in": float(spec.layout["columnwidth_in"]),
@@ -278,7 +308,12 @@ def resolve_layout(workspace: Path, spec: Spec, paper_dir: Path | None,
     return dict(DEFAULT_LAYOUT), "default (no paper to measure; set [layout] in the spec)"
 
 
-def width_in(artifact: Artifact, layout: dict[str, float]) -> float:
+def figure_font(spec: Spec, layout: dict[str, Any]) -> str:
+    """``[layout] font`` if set, else the measured body font, else ``serif``."""
+    return str(spec.layout.get("font") or layout.get("body_font") or "serif")
+
+
+def width_in(artifact: Artifact, layout: dict[str, Any]) -> float:
     if artifact.width == "column":
         return layout["columnwidth_in"]
     if artifact.width == "text":
@@ -300,9 +335,10 @@ class Result:
 @dataclass
 class BuildReport:
     results: list[Result]
-    layout: dict[str, float]
+    layout: dict[str, Any]
     layout_source: str
     errors: list[str] = field(default_factory=list)
+    font: str = "serif"
 
     @property
     def ok(self) -> bool:
@@ -310,7 +346,8 @@ class BuildReport:
 
     def render(self) -> str:
         lines = [(f"Layout: column {self.layout['columnwidth_in']:.3f} in, text "
-                 f"{self.layout['textwidth_in']:.3f} in ({self.layout_source})")]
+                 f"{self.layout['textwidth_in']:.3f} in, font {self.font} "
+                 f"({self.layout_source})")]
         lines += [f"ERROR {e}" for e in self.errors]
         for r in self.results:
             lines.append(f"{'OK   ' if r.ok else 'FAIL '} {r.id}"
@@ -319,7 +356,7 @@ class BuildReport:
 
 
 def _run_artifact(python: Path, workspace: Path, artifact: Artifact, out_dir: Path,
-                  layout: dict[str, float], font: str) -> Result:
+                  layout: dict[str, Any], font: str, methods: list[str]) -> Result:
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
@@ -327,7 +364,7 @@ def _run_artifact(python: Path, workspace: Path, artifact: Artifact, out_dir: Pa
                "out_dir": str(out_dir), "inputs": artifact.inputs,
                "code_dirs": [Path(artifact.script).parent.as_posix()],
                "width_in": width_in(artifact, layout), "height_in": artifact.height_in,
-               "font": font, "claim": artifact.claim}
+               "font": font, "methods": methods, "claim": artifact.claim}
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     env.update({"TARLAB_FIG_ARTIFACT": json.dumps(payload), "PYTHONHASHSEED": "0",
                 "PYTHONDONTWRITEBYTECODE": "1", "SOURCE_DATE_EPOCH": "0",
@@ -354,7 +391,7 @@ def _run_artifact(python: Path, workspace: Path, artifact: Artifact, out_dir: Pa
 
 
 def build(workspace: Path, paper_dir: Path | None = None, only: list[str] | None = None,
-          out_root: Path | None = None, layout: dict[str, float] | None = None,
+          out_root: Path | None = None, layout: dict[str, Any] | None = None,
           main: str = "main.tex") -> BuildReport:
     """Build the artifacts; with ``out_root`` (a scratch directory) nothing in the workspace
     or paper is written, which is how ``tex check`` rebuilds for comparison."""
@@ -365,7 +402,7 @@ def build(workspace: Path, paper_dir: Path | None = None, only: list[str] | None
         source = "given"
     else:
         layout, source = resolve_layout(workspace, spec, paper_dir, main)
-    report = BuildReport([], layout, source, list(spec.errors))
+    report = BuildReport([], layout, source, list(spec.errors), figure_font(spec, layout))
     python = figures_python()
     if python is None:
         report.errors.append("figures environment not found: run `tarlab figures setup`")
@@ -377,11 +414,11 @@ def build(workspace: Path, paper_dir: Path | None = None, only: list[str] | None
         report.errors.append(f"unknown artifact id(s): {', '.join(unknown)}")
         return report
     root = out_root or workspace / OUT
-    font = str(spec.layout.get("font", "serif"))
+    font = figure_font(spec, layout)
     selected = [a for a in spec.artifacts if not only or a.id in only]
     for artifact in selected:
         report.results.append(_run_artifact(python, workspace, artifact, root / artifact.id,
-                                            layout, font))
+                                            layout, font, spec.methods))
     if not scratch:
         _record(workspace, spec, selected, report, paper_dir, font)
     return report
@@ -415,7 +452,8 @@ def _record(workspace: Path, spec: Spec, built: list[Artifact], report: BuildRep
             "inputs": {p: path_sha256(workspace / p) for p in artifact.inputs},
             "outputs": result.outputs, "paper_outputs": artifact.paper_outputs(),
             "width": artifact.width, "width_in": width_in(artifact, report.layout),
-            "height_in": artifact.height_in, "font": font, "headline": artifact.headline,
+            "height_in": artifact.height_in, "font": font, "methods": spec.methods,
+            "headline": artifact.headline,
             "claim": artifact.claim,
         }
     prov_path.parent.mkdir(parents=True, exist_ok=True)

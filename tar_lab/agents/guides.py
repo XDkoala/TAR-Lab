@@ -19,10 +19,12 @@ FIGURES_HELPER = (Path(__file__).resolve().parents[1] / "figures" / "runtime"
 _FIGURES = f"""\
 - Figures and tables of results are generated from data. Declare each in
   `figures/spec.toml` (`[[figure]]` or `[[table]]` with `id`, `script` under
-  `figures/scripts/`, `inputs` = the exact result files it reads, `width` = "column" or
+  `figures/scripts/`, `inputs` = the exact result files or directories it reads, `width` = "column" or
   "text", `headline = true` for main results, which must read only `results/final/`, and a
   one-sentence `claim`). Scripts use `import tarlab_fig as tf` (`tf.load_json`,
-  `tf.mean_ci`, `tf.figure()` + `tf.save(fig)`, `tf.booktabs(...)` + `tf.save_table(...)`;
+  `tf.mean_ci`, `tf.fmt`/`tf.interval`, `tf.figure()` + `tf.save(fig)`,
+  `tf.method_style(name)` with the method order in `[style] methods`, `tf.booktabs(...)` +
+  `tf.save_table(...)`, LaTeX cells wrapped in `tf.Raw`;
   docs: `{FIGURES_HELPER}`) and may read nothing but their inputs. Build them with
   `{sys.executable} -m tar_lab.cli figures build` (writes `figures/out/<id>/`, copies the
   paper files into `paper/generated/`, records provenance; never edit those files) and open
