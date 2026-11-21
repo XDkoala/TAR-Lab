@@ -139,6 +139,7 @@ tarlab status projects/<项目> --json
 - 每个项目同时只能有一个运行器，第二个会直接退出（退出码 4）。
 - 项目完成退出码为 0，暂停为 3；这两种情况服务都不会重启。
 - 想在注销后也保持运行，执行一次 `loginctl enable-linger $USER`。
+- 服务不继承 shell 里的环境变量。要给服务设 `TARLAB_FALLBACK`、`TARLAB_TIERS`、`TARLAB_MAIN` 等，写进 `~/.config/tar-lab/runner.env`（每行 `KEY=VALUE`，遵循 `XDG_CONFIG_HOME`），改完执行 `tarlab service stop` 再 `start`。
 - `-p` 的退出码：拿到回答为 0；没有运行器为 2，此时消息留在队列里；超时（默认 900 秒，用 `--wait` 修改）为 124。
 
 ## 项目运行规则

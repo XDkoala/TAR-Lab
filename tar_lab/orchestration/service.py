@@ -70,6 +70,7 @@ WorkingDirectory={root}
 ExecStart={python} -m tar_lab.cli run {root}
 UnsetEnvironment=PYTHONPATH
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%E/tar-lab/runner.env
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus={EXIT_SUSPENDED} {EXIT_ALREADY_RUNNING}

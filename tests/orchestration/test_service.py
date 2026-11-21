@@ -32,6 +32,7 @@ def test_unit_restarts_crashes_but_not_finished_or_suspended_runs(project: Path)
     text = service.unit_text(project, python="/venv/bin/python")
     assert f"ExecStart=/venv/bin/python -m tar_lab.cli run {project}" in text
     assert "Restart=on-failure" in text and "UnsetEnvironment=PYTHONPATH" in text
+    assert "EnvironmentFile=-%E/tar-lab/runner.env" in text  # optional TARLAB_* settings
     assert (f"RestartPreventExitStatus={service.EXIT_SUSPENDED} "
             f"{service.EXIT_ALREADY_RUNNING}") in text
     name = service.unit_name(project)
