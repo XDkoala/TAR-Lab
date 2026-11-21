@@ -67,6 +67,31 @@ uv run ruff check . && uv run mypy src tests && uv run pytest -q -n auto
   不建立 `/usr/local/bin` 符号链接，也不改 `PATH`；TAR-Lab 直接调用 `.tools/texlive/<年份>/bin/x86_64-linux`（有多个年份时用最新的）。
 - 投稿前检查：`tarlab tex check paper [--page-limit 8] [--anonymous] [--json]` 把论文目录（去掉 `.aux`、`.log`、`.bbl`、`main.pdf` 等编译产物）复制到临时目录重新编译，确认源码自包含，再检查：日志里的 LaTeX 错误、未定义的引用和交叉引用、缺失文件、超过 1pt 的 overfull \hbox、字体替换；`pdffonts` 是否全部嵌入、有没有 Type 3 字体；`pdfinfo` 页数（含参考文献）；`\cite` 的键是否都在 `.bib` 里、条目是否缺标题或年份；`--anonymous` 时查作者、邮箱、`github.com/<用户>` 链接和致谢。每项 PASS/WARN/FAIL/SKIP，有 FAIL 时退出码为 1；没装 poppler（`pdffonts` 等）时对应项为 SKIP。
   在论文目录的上一级（工作区）有 `figures/spec.toml` 时，还会检查生成的图表：是否都已生成；脚本和输入数据自上次生成后有没有改动；`paper/generated/` 里的文件有没有被手改；在临时目录重新生成一遍能否逐字节复现；主要结果的图表是否只读了 `results/final/`（以上任一不满足为 FAIL）。另外检查图是否按论文实际栏宽绘制且没有被缩放、手写表格里有没有直接敲进去的小数、位图分辨率是否低于 300 ppi（这几项为 WARN）。
+- `texlive-arxiv/2025/`：arXiv 用的 TeX Live 2025，取自 texlive.info 的每日存档，冻结在 arXiv 采用的 2025-08-03 状态（scheme-full，不含文档和源码，4.5 GB；pdfTeX 1.40.28、latexmk 4.87、BibTeX 0.99d、biber 2.21），只给 `tex check --arxiv` 和 `tex arxiv` 用。不要对它运行 `tlmgr update`。安装（不需要 sudo，约 1 小时）：
+
+  ```bash
+  T=/path/to/Trusted-Autonomous-Research-Lab/.tools/texlive-arxiv   # 改成实际的绝对路径
+  R=https://texlive.info/tlnet-archive/2025/08/03/tlnet
+  mkdir -p $T && cd /tmp && curl -fSLO $R/install-tl-unx.tar.gz
+  tar xzf install-tl-unx.tar.gz && cd install-tl-20250803
+  cat > texlive.profile <<EOF
+  selected_scheme scheme-full
+  TEXDIR $T/2025
+  TEXMFLOCAL $T/2025/texmf-local
+  TEXMFSYSVAR $T/2025/texmf-var
+  TEXMFSYSCONFIG $T/2025/texmf-config
+  TEXMFVAR $T/2025/texmf-var
+  TEXMFCONFIG $T/2025/texmf-config
+  TEXMFHOME $T/texmf-home
+  binary_x86_64-linux 1
+  instopt_adjustpath 0
+  instopt_letter 0
+  tlpdbopt_autobackup 0
+  tlpdbopt_install_docfiles 0
+  tlpdbopt_install_srcfiles 0
+  EOF
+  ./install-tl --no-interaction -profile texlive.profile -repository $R
+  ```
 - arXiv 检查：`tarlab tex check paper --arxiv` 用 `texlive-arxiv/2025`（arXiv 现在默认的 TeX Live 2025，冻结在 arXiv 采用的 2025-08-03 状态）先编译一遍，再按 latexmk 的记录文件（`main.fls`）只挑出编译时实际读到的文件，加上 `.bbl` 和 `.bib`，单独再编译一次，确认上传包自包含。另外按 arXiv 的 TeX Live 2025 说明检查：`\input` 等用了绝对路径或 `..`、hyperxmp 先于 hyperref 加载、minted 缺 `_minted` 目录、上传包超过 50 MiB（这些为 FAIL）；cleveref 配 `\newtheorem`、把 `\doublespace` 当命令用、隐藏文件、文件名含特殊字符（这些为 WARN）；论文目录里没用到的文件会列出来，不放进包。`tarlab tex arxiv paper [-o reports/arxiv.tar.gz]` 检查通过后写出可直接上传的 `.tar.gz`（文件顺序、时间戳固定）。没装 TeX Live 2025 时用本地 2026 编译并给出 WARN。用 `TARLAB_ARXIV_TEXLIVE_BIN` 可以指定别的目录。
 - 页面渲染：`tarlab tex render paper [--dpi 110]` 把已编译的 PDF 每页渲染成 PNG，放到 `reports/paper_pages/`，供写作者和审稿人看图检查。
 - `figures/venv`：画论文图表专用的 Python 3.11 环境（matplotlib、numpy、pandas、scipy，版本和哈希锁在 `tar_lab/figures/requirements.lock`），用 `tarlab figures setup` 创建，可用 `TARLAB_FIGURES_PYTHON` 指定别的解释器。`tarlab figures build` 按工作区的 `figures/spec.toml` 逐个运行图表脚本：
