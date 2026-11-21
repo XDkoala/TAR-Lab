@@ -53,5 +53,6 @@ def project_spend(events: Iterable[Event], orders: Mapping[str, OrderState],
         usd += cost or 0.0
     for e in events:
         if e.kind in MAIN_AGENT_USAGE and "usage" in e.payload:
-            usd += estimate_usd(main_model, Usage(**e.payload["usage"])) or 0.0
+            model = e.payload.get("model") or main_model  # older events name no model
+            usd += estimate_usd(model, Usage(**e.payload["usage"])) or 0.0
     return Spend(usd, tuple(unpriced))

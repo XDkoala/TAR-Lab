@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import jsonschema
+
 from tar_lab.agents.roles import render_prompt
 from tar_lab.core.workorder import (
     REPORTED_STATUSES,
@@ -160,6 +162,46 @@ class DevinExecutor:
                           tuple(map(str, report.get("deliverables", []))),
                           tuple(map(str, report.get("sources", []))), **common)
 
+    def ask(self, prompt: str, schema: dict[str, Any], *, cwd: Path, log_dir: Path,
+            timeout: float = 900) -> tuple[dict[str, Any], Usage]:
+        """One fresh read-only session that must answer with JSON matching ``schema``. Devin
+        has no output-schema flag, so the answer is validated here; an invalid one gets a
+        single correction turn in the same session."""
+        cwd, log_dir = cwd.resolve(), log_dir.resolve()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        export = log_dir / "export.json"
+        export.unlink(missing_ok=True)
+        text = (f"{prompt}\n\nAnswer with exactly one JSON object that validates against this "
+                f"JSON Schema, and nothing after it:\n```json\n{json.dumps(schema)}\n```\n")
+        session: str | None = None
+        for turn in (1, 2):
+            prompt_path, stdout = log_dir / f"prompt-{turn}.md", log_dir / f"stdout-{turn}.txt"
+            prompt_path.write_text(text)
+            cmd = [self.binary or find_devin(), "-p", "--prompt-file", str(prompt_path),
+                   "--model", self.model, "--permission-mode", "auto",
+                   "--respect-workspace-trust", "false", "--process-model", "in-process",
+                   "--export", str(export)]
+            if session:
+                cmd += ["-r", session]
+            outcome = run_supervised(
+                cmd, cwd=cwd, stdin_path=None, stdout_path=stdout,
+                stderr_path=log_dir / f"stderr-{turn}.log", timeout=timeout,
+                emit=lambda _kind, _payload: None, env=clean_env())
+            metrics = _read_export(export)
+            session = metrics.get("session_id") or session
+            answer, problem = _json_answer(stdout.read_text(encoding="utf-8", errors="replace"),
+                                           schema)
+            if answer is not None:
+                return answer, metrics.get("usage", Usage())
+            if outcome.timed_out or not session:
+                detail = "timed out" if outcome.timed_out else (
+                    tail(log_dir / f"stderr-{turn}.log") or tail(stdout)
+                    or f"exit code {outcome.returncode}")
+                raise RuntimeError(f"devin gave no JSON answer: {detail}")
+            text = (f"Your answer was not valid: {problem}\nReply again with only the JSON "
+                    "object, valid against the schema given before.")
+        raise RuntimeError(f"devin gave no valid JSON answer: {problem}")
+
     def session_usage(self, session_id: str) -> Usage | None:
         # The export is only written when a turn completes; a killed turn leaves no record.
         return None
@@ -179,6 +221,28 @@ def extract_report(text: str) -> dict[str, Any] | None:
             return data
         pos = text.rfind("{", 0, pos)
     return None
+
+
+def _json_answer(text: str, schema: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """The last JSON object in ``text`` valid against ``schema``, else why there is none."""
+    decoder, problem, widest = json.JSONDecoder(), "no JSON object found", 0
+    pos = text.rfind("{")
+    while pos != -1:
+        try:
+            data, end = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            data, end = None, pos
+        if isinstance(data, dict):
+            try:
+                jsonschema.validate(data, schema)
+                return data, ""
+            except jsonschema.ValidationError as exc:
+                if end - pos > widest:  # report the outermost object, not a nested one
+                    widest = end - pos
+                    where = "/".join(map(str, exc.absolute_path)) or "/"
+                    problem = f"{exc.message} (at {where})"
+        pos = text.rfind("{", 0, pos)
+    return None, problem
 
 
 def _read_export(path: Path) -> dict[str, Any]:

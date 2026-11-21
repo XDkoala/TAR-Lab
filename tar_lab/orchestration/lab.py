@@ -13,11 +13,11 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar, cast
 
-from tar_lab.agents.main_agent import Decision, MainAgent, Question, compact
+from tar_lab.agents.main_agent import Decision, JsonModel, MainAgent, Question, compact
 from tar_lab.agents.roles import ROLES
 from tar_lab.core import preflight, seal
 from tar_lab.core.charter import APPROVAL_POINTS, Charter
@@ -30,6 +30,17 @@ from tar_lab.integrations.cli_agents.process import quota_error
 
 from .kernel import Kernel
 from .notify import ConsoleNotifier, NotificationError, Notifier
+
+_T = TypeVar("_T")
+
+
+def _executor_of(agent: MainAgent) -> str:
+    return str(getattr(agent.model, "name", "main-agent"))
+
+
+def _model_of(agent: MainAgent) -> str:
+    return str(getattr(agent.model, "model", ""))
+
 
 LabStatus = Literal["intake", "working", "busy", "waiting", "error", "finished", "suspended"]
 WAKE = frozenset({"project.charter", "project.resumed", "order.finished", "order.cancelled",
@@ -129,20 +140,23 @@ class Lab:
         if not self._events("project.created"):
             self.ledger.append("project.created", None, {"idea": idea})
         pi_dir = self.kernel.project.root / "pi"
-        questions, usage = self.agent.intake_questions(idea, pi_dir / "intake-questions")
+        (questions, usage), model = self._call_main(
+            lambda a: a.intake_questions(idea, pi_dir / "intake-questions"))
         answers = []
         for q in questions:
             answer = ask(q).strip() or q.default
             answers.append((q, answer))
         self.ledger.append("intake.answers", None, {
             "answers": [{**asdict(q), "answer": a} for q, a in answers],
-            "usage": asdict(usage)})
-        charter, usage = self.agent.draft_charter(idea, answers, pi_dir / "intake-charter")
+            "usage": asdict(usage), "model": model})
+        (charter, usage), model = self._call_main(
+            lambda a: a.draft_charter(idea, answers, pi_dir / "intake-charter"))
         if not confirm(charter):
             self.ledger.append("intake.rejected", None, {"charter": charter.to_dict()})
             return None
         self.ledger.append("project.charter", None,
-                           {"charter": charter.to_dict(), "usage": asdict(usage)})
+                           {"charter": charter.to_dict(), "usage": asdict(usage),
+                            "model": model})
         return charter
 
     def reply(self, qid: str, answer: str, *, auto: bool = False) -> None:
@@ -212,7 +226,7 @@ class Lab:
         self._verify_seals(charter)
         charter = self.charter() or charter
         exhausted = self._budget(charter)
-        agent_down = self._agent_executor() in self.kernel.unavailable()
+        agent_down = _executor_of(self._main()) in self.kernel.unavailable()
         if busy and not agent_down and (self._urgent_message() or self._settled()):
             return self._decide(charter)
         if self._pause_requested():
@@ -285,7 +299,30 @@ class Lab:
         return any(e.seq > since for e in self._events(*BUSY_WAKE))
 
     def _agent_executor(self) -> str:
-        return str(getattr(self.agent.model, "name", "main-agent"))
+        return _executor_of(self.agent)
+
+    def _main(self) -> MainAgent:
+        """The main agent on its own executor or, while that one is out of quota, on its
+        fallback (``Kernel.fallbacks``)."""
+        name = self._agent_executor()
+        if name in self.kernel.unavailable() and (fallback := self.kernel.fallback_for(name)):
+            model = self.kernel.executors[fallback]
+            if callable(getattr(model, "ask", None)):
+                return replace(self.agent, model=cast(JsonModel, model))
+        return self.agent
+
+    def _call_main(self, call: Callable[[MainAgent], _T]) -> tuple[_T, str]:
+        """Run ``call`` on the main agent; on a quota error switch to the fallback once."""
+        agent = self._main()
+        try:
+            return call(agent), _model_of(agent)
+        except (RuntimeError, OSError) as exc:
+            if not quota_error(str(exc)):
+                raise
+            self.kernel.mark_unavailable(_executor_of(agent), str(exc))
+            if (other := self._main()) is agent:
+                raise
+            return call(other), _model_of(other)
 
     def spend(self) -> Spend:
         models = {name: str(getattr(ex, "model", name)) for name, ex in
@@ -475,12 +512,13 @@ class Lab:
     def _decide(self, charter: Charter) -> LabStatus:
         n = len(self._events("pi.decision")) + 1
         log_dir = self.kernel.project.root / "pi" / f"decision-{n:03d}"
+        agent = self._main()
         try:
-            decision, usage = self.agent.decide(self.context(charter), log_dir)
+            decision, usage = agent.decide(self.context(charter), log_dir)
         except (RuntimeError, TypeError, KeyError, ValueError, OSError) as exc:
             if quota_error(str(exc)):
-                self.kernel.mark_unavailable(self._agent_executor(), str(exc))
-                return "waiting"
+                self.kernel.mark_unavailable(_executor_of(agent), str(exc))
+                return "waiting"  # the next step decides on the fallback, if there is one
             since = self._last_seq("pi.decision")
             errors = [e for e in self._events("lab.error") if e.seq > since]
             self.ledger.append("lab.error", None, {"error": str(exc)[:2000]})
@@ -489,7 +527,8 @@ class Lab:
             self._notify("Main agent error (will retry)", str(exc)[:2000])
             return "error"
         ev = self.ledger.append("pi.decision", None,
-                                {"decision": decision.to_dict(), "usage": asdict(usage)})
+                                {"decision": decision.to_dict(), "usage": asdict(usage),
+                                 "model": _model_of(agent)})
         self._apply(ev, charter)
         return self.status() or "working"
 

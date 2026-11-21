@@ -1143,6 +1143,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx2", extra = ["socks"] },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "prompt-toolkit" },
     { name = "rich" },
@@ -1158,6 +1159,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx2", extras = ["socks"], specifier = ">=2.16,<3" },
+    { name = "jsonschema", specifier = ">=4.20" },
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "prompt-toolkit", specifier = ">=3.0.53,<4" },
     { name = "rich", specifier = ">=15.0.0,<16" },

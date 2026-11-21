@@ -111,3 +111,67 @@ def test_tiers_and_fallbacks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert _fallbacks() == {}
     monkeypatch.setenv("TARLAB_FALLBACK", "codex=devin")
     assert _fallbacks() == {"codex": "devin"}
+
+
+FAKE_ASK = textwrap.dedent("""\
+    #!{python}
+    import json, os, sys
+    args = sys.argv[1:]
+    log = os.environ["FAKE_LOG"]
+    with open(log, "a") as f:
+        f.write(json.dumps({{"args": args,
+                            "prompt": open(args[args.index("--prompt-file") + 1]).read()}})
+                + "\\n")
+    json.dump({{"session_id": "s1", "final_metrics": {{"total_prompt_tokens": 9,
+               "total_cached_tokens": 1, "total_completion_tokens": 3}}}},
+              open(args[args.index("--export") + 1], "w"))
+    if "-r" in args:
+        print('Fixed: {{"questions": [{{"key": "k", "text": "t"}}]}}')
+    else:
+        print('Here: {{"questions": [{{"key": "k"}}]}}')
+""")
+
+
+def test_devin_ask_validates_and_corrects_once(tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    script = tmp_path / "devin"
+    script.write_text(FAKE_ASK.format(python=sys.executable))
+    script.chmod(0o755)
+    monkeypatch.setenv("FAKE_LOG", str(tmp_path / "calls.log"))
+    item = {"type": "object", "required": ["key", "text"],
+            "properties": {"key": {"type": "string"}, "text": {"type": "string"}}}
+    schema = {"type": "object", "required": ["questions"],
+              "properties": {"questions": {"type": "array", "items": item}}}
+    answer, usage = DevinExecutor(binary=str(script)).ask(
+        "Ask the user.", schema, cwd=tmp_path, log_dir=tmp_path / "log")
+    assert answer == {"questions": [{"key": "k", "text": "t"}]} and usage == Usage(9, 1, 3)
+    first, second = (json.loads(line) for line in (tmp_path / "calls.log").read_text()
+                     .splitlines())
+    assert first["args"][first["args"].index("--permission-mode") + 1] == "auto"  # read-only
+    assert '"required": ["questions"]' in first["prompt"] and "-r" not in first["args"]
+    assert second["args"][-2:] == ["-r", "s1"]
+    assert "'text' is a required property (at questions/0)" in second["prompt"]
+
+
+def test_devin_ask_raises_without_answer(tmp_path: Path) -> None:
+    script = tmp_path / "devin"
+    script.write_text(f"#!{sys.executable}\nimport sys\nprint('Weekly usage limit reached',"
+                      " file=sys.stderr)\nsys.exit(1)\n")
+    script.chmod(0o755)
+    with pytest.raises(RuntimeError, match="usage limit"):
+        DevinExecutor(binary=str(script)).ask("q", {"type": "object"}, cwd=tmp_path,
+                                              log_dir=tmp_path / "log")
+
+
+def test_main_agent_defaults_to_devin(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tar_lab.cli import _executors, _main_executor
+
+    executors = _executors()
+    monkeypatch.setenv("TARLAB_DEVIN_BIN", sys.executable)
+    monkeypatch.delenv("TARLAB_MAIN", raising=False)
+    assert _main_executor(executors) == "devin"
+    monkeypatch.setenv("TARLAB_MAIN", "codex")
+    assert _main_executor(executors) == "codex"
+    monkeypatch.setenv("TARLAB_MAIN", "ai-scientist")
+    with pytest.raises(SystemExit):
+        _main_executor(executors)

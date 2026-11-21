@@ -644,3 +644,41 @@ def test_final_eval_prompt_explains_the_seal() -> None:
     assert "## Sealed final evaluation" in text and "results/final/o9-1-engineer/" in text
     assert "## Sealed final evaluation" not in render_prompt(
         WorkOrder("o9-2-engineer", "engineer", "codex", "x", (), "y", Limits(600)))
+
+
+@dataclass
+class NamedModel(FakeModel):
+    name: str = "devin"
+    model: str = "claude-opus-5-5-medium"
+
+
+def test_main_agent_switches_to_fallback_when_out_of_quota(tmp_path: Path) -> None:
+    from tar_lab.core.pricing import estimate_usd, project_spend
+
+    project = Project(tmp_path / "proj")
+    project.init()
+    error = RuntimeError("devin gave no JSON answer: weekly usage limit reached")
+    devin = NamedModel([error])
+    codex = NamedModel([decision(message="from codex")], name="codex", model="gpt-6.1-sol")
+    kernel = Kernel(project, Ledger(project.ledger_path), {"fake": FakeExecutor([]),
+                                                           "codex": codex},  # type: ignore[dict-item]
+                    fallbacks={"devin": "codex"})
+
+    class Notes:
+        def notify(self, subject: str, body: str) -> None:
+            pass
+
+    lab = Lab(kernel, MainAgent(devin, project.root), Notes(),
+              {"high": "fake", "medium": "fake", "low": "fake"})
+    lab.start("idea", ask=lambda q: "", confirm=lambda c: True)
+    assert lab.step() == "waiting"  # devin hit its quota on the first decision
+    lab.step()
+    assert [e.payload["text"] for e in lab._events("pi.message")] == ["from codex"]
+    models = [e.payload["model"] for e in lab._events("intake.answers", "project.charter",
+                                                      "pi.decision")]
+    assert models == ["claude-opus-5-5-medium", "claude-opus-5-5-medium", "gpt-6.1-sol"]
+    spend = project_spend(lab.ledger.events(), {}, lambda e: e, "gpt-6.1-sol")
+    expected = [estimate_usd(m, u) for m, u in zip(models, (Usage(5, 0, 1), Usage(5, 0, 1),
+                                                            Usage(10, 0, 2)), strict=True)]
+    assert spend.usd == pytest.approx(sum(x or 0.0 for x in expected))
+    assert all(expected)  # each call priced at its own model's rate

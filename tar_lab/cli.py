@@ -12,11 +12,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 
-from .agents.main_agent import MainAgent, Question
+from .agents.main_agent import JsonModel, MainAgent, Question
 from .core.charter import Charter
 from .core.ledger import Ledger, OrderState
 from .core.machine import describe
@@ -216,9 +216,28 @@ def _tiers(executors: Mapping[str, object]) -> dict[str, str]:
     return tiers
 
 
+def _main_executor(executors: Mapping[str, object]) -> str:
+    """The main agent talks with the user (intake questions, charter, approvals, replies), so
+    it runs on Devin by default. ``TARLAB_MAIN=codex`` overrides; without a Devin CLI it falls
+    back to Codex with a warning."""
+    name = os.environ.get("TARLAB_MAIN", "").strip() or "devin"
+    if not callable(getattr(executors.get(name), "ask", None)):
+        raise SystemExit(f"TARLAB_MAIN: {name!r} cannot run the main agent (use devin or codex)")
+    if name == "devin":
+        try:
+            find_devin()
+        except FileNotFoundError:
+            print("Warning: devin CLI not found (set TARLAB_DEVIN_BIN); the main agent runs on "
+                  "codex.", file=sys.stderr)
+            return "codex"
+    return name
+
+
 def _lab(root: Path) -> Lab:
     kernel = _kernel(root)
-    agent = MainAgent(CodexExecutor(), kernel.project.root, describe(kernel.project.root))
+    model = kernel.executors[_main_executor(kernel.executors)]
+    agent = MainAgent(cast(JsonModel, model), kernel.project.root,
+                      describe(kernel.project.root))
     return Lab(kernel, agent, default_notifier(), tiers=_tiers(kernel.executors),
                check_requirements=True)
 
@@ -257,8 +276,10 @@ def _undermind_workspace(lab: Lab, charter: Charter) -> None:
 def _tui(project: Path | None, lang: str | None = None) -> int:
     from .tui.launch import main as tui_main
 
-    models = {name: str(getattr(ex, "model", name)) for name, ex in _executors().items()}
-    return tui_main(project, lab_for=_lab, models=models, main_model=CodexExecutor().model,
+    executors = _executors()
+    models = {name: str(getattr(ex, "model", name)) for name, ex in executors.items()}
+    main_model = models[_main_executor(executors)]
+    return tui_main(project, lab_for=_lab, models=models, main_model=main_model,
                     init=_init_project, after_charter=_undermind_workspace, lang=lang)
 
 
