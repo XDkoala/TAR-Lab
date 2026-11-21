@@ -12,3 +12,6 @@
   .venv/bin/mypy src tests && env -u PYTHONPATH .venv/bin/pytest -q -n 8 -p no:cacheprovider tests`.
 - Engine agents launch through `../.tools/headless/dist/cli.js`; PDFs build with the TeX Live in
   `../.tools/texlive/<year>` (`latexmk`), falling back to `../.tools/tectonic/bin/tectonic`.
+- Paper figures/tables run in their own env `../.tools/figures/venv` (`tarlab figures setup`, pinned by
+  `tar_lab/figures/requirements.lock`). `tar_lab/figures/runtime/` runs in that env, not the platform's: keep it
+  free of `tar_lab` imports, and keep the table helpers in `tarlab_fig.py` stdlib-only (tests import them).

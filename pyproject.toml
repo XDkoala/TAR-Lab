@@ -30,6 +30,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["tar_lab*"]
 
+[tool.setuptools.package-data]
+"tar_lab.figures" = ["requirements.in", "requirements.lock"]
+
 [tool.uv]
 exclude-newer = "7 days"
 

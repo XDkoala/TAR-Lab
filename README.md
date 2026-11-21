@@ -66,6 +66,13 @@ uv run ruff check . && uv run mypy src tests && uv run pytest -q -n auto
 
   不建立 `/usr/local/bin` 符号链接，也不改 `PATH`；TAR-Lab 直接调用 `.tools/texlive/<年份>/bin/x86_64-linux`（有多个年份时用最新的）。
 - 投稿前检查：`tarlab tex check paper [--page-limit 8] [--anonymous] [--json]` 把论文目录（去掉 `.aux`、`.log`、`.bbl`、`main.pdf` 等编译产物）复制到临时目录重新编译，确认源码自包含，再检查：日志里的 LaTeX 错误、未定义的引用和交叉引用、缺失文件、超过 1pt 的 overfull \hbox、字体替换；`pdffonts` 是否全部嵌入、有没有 Type 3 字体；`pdfinfo` 页数（含参考文献）；`\cite` 的键是否都在 `.bib` 里、条目是否缺标题或年份；`--anonymous` 时查作者、邮箱、`github.com/<用户>` 链接和致谢。每项 PASS/WARN/FAIL/SKIP，有 FAIL 时退出码为 1；没装 poppler（`pdffonts` 等）时对应项为 SKIP。
+  在论文目录的上一级（工作区）有 `figures/spec.toml` 时，还会检查生成的图表：是否都已生成；脚本和输入数据自上次生成后有没有改动；`paper/generated/` 里的文件有没有被手改；在临时目录重新生成一遍能否逐字节复现；主要结果的图表是否只读了 `results/final/`（以上任一不满足为 FAIL）。另外检查图是否按论文实际栏宽绘制且没有被缩放、手写表格里有没有直接敲进去的小数、位图分辨率是否低于 300 ppi（这几项为 WARN）。
+- 页面渲染：`tarlab tex render paper [--dpi 110]` 把已编译的 PDF 每页渲染成 PNG，放到 `reports/paper_pages/`，供写作者和审稿人看图检查。
+- `figures/venv`：画论文图表专用的 Python 3.11 环境（matplotlib、numpy、pandas、scipy，版本和哈希锁在 `tar_lab/figures/requirements.lock`），用 `tarlab figures setup` 创建，可用 `TARLAB_FIGURES_PYTHON` 指定别的解释器。`tarlab figures build` 按工作区的 `figures/spec.toml` 逐个运行图表脚本：
+  - 脚本只能读自己声明的输入文件和 `figures/` 下的代码，只能写自己的输出目录，不能启动子进程（Python 审计钩子强制执行）；
+  - 图按目标模板实测的 `\columnwidth`/`\textwidth` 绘制（测量结果按导言区哈希缓存），字体与正文接近（默认 Times 风格的 STIX，可选 Computer Modern 或无衬线），字体以 TrueType 嵌入，没有 Type 3；
+  - 输出写到 `figures/out/<id>/`（PDF、300 dpi 的 PNG 预览、表格 `.tex` 片段），论文用到的文件复制到 `paper/generated/`；脚本、输入、输出的哈希记在 `figures/out/provenance.json`。输出逐字节确定，所以 `tex check` 能重新生成并比对。
+  规格格式和脚本辅助函数见 `tar_lab/figures/build.py` 和 `tar_lab/figures/runtime/tarlab_fig.py` 的文档字符串。
 - `tectonic/bin/tectonic`：备用引擎，只在找不到 TeX Live 时使用。Tectonic 0.17.0（`tectonic-0.17.0-x86_64-unknown-linux-gnu.tar.gz`，SHA-256 `1a715688baf591e650c8aeb160ae934e181685eecbb38b317de30b269ac5d606`），基于 XeTeX，字体和断行可能与会议用的 `pdflatex` 不同；第一次编译会自动下载用到的宏包。可用 `TARLAB_TECTONIC` 指定路径。
 
 平台和引擎使用各自独立的环境。平台通过命令行和运行目录里的文件调用引擎，不导入引擎的 Python 代码。
@@ -124,6 +131,8 @@ uv run tarlab undermind status         # 查看凭据状态（不联网）
 uv run tarlab undermind tools          # 列出工具及权限判定（默认只读）
 uv run tarlab undermind call <tool> --args '{"key": "value"}'
 uv run tarlab engine summary ../runs/circpack/codex/20261116_143042   # 汇总一次引擎运行
+uv run tarlab figures setup            # 创建论文图表专用环境（一次性）
+uv run tarlab figures build --workspace <工作区>   # 按 figures/spec.toml 生成图表
 ```
 
 ## 文献检索密钥

@@ -4,7 +4,8 @@ The paper is copied without build products to a fresh temporary directory and bu
 with :func:`tar_lab.tools.tex.build`, as arXiv and venue systems do, which proves the source
 tree is self-contained. Then the LaTeX log, the PDF (``pdffonts``, ``pdfinfo``,
 ``pdftotext`` from poppler; a check is skipped when its tool is missing), the bibliography
-and, optionally, anonymity are checked. Each check is PASS, WARN, FAIL or SKIP.
+and, optionally, anonymity are checked, as are the generated figures and tables of
+:mod:`tar_lab.figures` when the workspace declares them (:mod:`tar_lab.figures.audit`). Each check is PASS, WARN, FAIL or SKIP.
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ class CheckReport:
     def render(self) -> str:
         lines = [f"Paper: {self.paper_dir} ({self.main}); engine: {self.engine or 'none'}"]
         for c in self.checks:
-            lines.append(f"{c.status:4}  {c.name:18} {c.summary}")
+            lines.append(f"{c.status:4}  {c.name:20} {c.summary}")
             shown = c.details[:MAX_DETAILS]
             lines.extend(f"      {d}" for d in shown)
             if len(c.details) > len(shown):
@@ -401,14 +402,22 @@ def copy_sources(src: Path, dst: Path, main: str = "main.tex") -> None:
 
 
 def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None = None,
-                anonymous: bool = False, timeout: float = 600) -> CheckReport:
+                anonymous: bool = False, timeout: float = 600,
+                workspace: Path | None = None) -> CheckReport:
+    """``workspace`` (default: the paper's parent) holds ``figures/spec.toml``; when it
+    exists, generated figures and tables are checked too."""
+    from ..figures import audit
+    from ..figures.build import SPEC, insert_layout_probe, parse_layout
+
     paper_dir = paper_dir.resolve()
+    workspace = (workspace or paper_dir.parent).resolve()
     if not (paper_dir / main).is_file():
         return CheckReport(str(paper_dir), main, "", [
             Check("build", FAIL, f"{main} not found in {paper_dir}")])
     with tempfile.TemporaryDirectory(prefix="tarlab-tex-check-") as tmp:
         work = Path(tmp) / "paper"
         copy_sources(paper_dir, work, main)
+        insert_layout_probe(work / main)
         result = build(work, main, timeout=timeout)
         checks: list[Check] = []
         if result.pdf:
@@ -420,9 +429,11 @@ def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None 
                                 f"clean-copy build failed (exit {result.returncode}, "
                                 f"engine {result.engine or 'none'})", tail))
         tex_log = work / f"{Path(main).stem}.log"
+        layout = None
         if tex_log.is_file():
-            checks.extend(log_checks(parse_log(
-                tex_log.read_text(encoding="utf-8", errors="replace"))))
+            log_text = tex_log.read_text(encoding="utf-8", errors="replace")
+            layout = parse_layout(log_text)
+            checks.extend(log_checks(parse_log(log_text)))
         else:
             checks.append(Check("latex log", SKIP, f"no {tex_log.name} produced"))
         pdf = result.pdf
@@ -437,8 +448,26 @@ def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None 
             info = _run(["pdfinfo", str(pdf)])
             checks.append(page_check(parse_pdfinfo_pages(info) if info else None,
                                      page_limit, pdf_text))
+            checks.append(audit.resolution_check(_run(["pdfimages", "-list", str(pdf)])))
         tex = read_sources(work)
         checks.append(bib_check(work, tex))
+        checks.append(audit.handwritten_table_check(work))
+        if (workspace / SPEC).is_file():
+            checks.append(audit.artifact_check(workspace, paper_dir))
+            checks.append(audit.size_check(workspace, tex, layout))
         if anonymous:
             checks.append(anonymity_check(tex, pdf_text))
     return CheckReport(str(paper_dir), main, result.engine, checks)
+
+
+def render_pages(pdf: Path, out_dir: Path, dpi: int = 110) -> list[Path]:
+    """Render every page to ``out_dir/page-NN.png`` (``pdftoppm``) for visual review;
+    earlier ``page-*.png`` renders there are removed first."""
+    if not shutil.which("pdftoppm"):
+        raise FileNotFoundError("pdftoppm not found (install poppler-utils)")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("page-*.png"):
+        old.unlink()
+    subprocess.run(["pdftoppm", "-r", str(dpi), "-png", str(pdf), str(out_dir / "page")],
+                   check=True, capture_output=True)
+    return sorted(out_dir.glob("page-*.png"))

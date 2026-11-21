@@ -13,6 +13,25 @@ ENGINE_EXAMPLE = (Path(__file__).resolve().parents[2] / "engines" / "ai-scientis
                   / "examples" / "circpack")
 # Official LaTeX templates per venue and year, each with a SOURCE.md (see its README.md).
 VENUE_TEMPLATES = Path(__file__).resolve().parents[2] / "templates" / "venues"
+FIGURES_HELPER = (Path(__file__).resolve().parents[1] / "figures" / "runtime"
+                  / "tarlab_fig.py")
+
+_FIGURES = f"""\
+- Figures and tables of results are generated from data. Declare each in
+  `figures/spec.toml` (`[[figure]]` or `[[table]]` with `id`, `script` under
+  `figures/scripts/`, `inputs` = the exact result files it reads, `width` = "column" or
+  "text", `headline = true` for main results, which must read only `results/final/`, and a
+  one-sentence `claim`). Scripts use `import tarlab_fig as tf` (`tf.load_json`,
+  `tf.mean_ci`, `tf.figure()` + `tf.save(fig)`, `tf.booktabs(...)` + `tf.save_table(...)`;
+  docs: `{FIGURES_HELPER}`) and may read nothing but their inputs. Build them with
+  `{sys.executable} -m tar_lab.cli figures build` (writes `figures/out/<id>/`, copies the
+  paper files into `paper/generated/`, records provenance; never edit those files) and open
+  every `figures/out/<id>/<id>.png`: it is the figure at print size.
+- One message per figure, stated by its `claim`; no title inside the figure (the caption
+  carries it); axis labels with units; the same method keeps the same name, colour and
+  marker in every figure; show spread over seeds (error bars or bands) and say in the
+  caption what it is (std or 95% CI, n seeds). Tables: same decimals per column, units in
+  the header, bold only differences that are meaningful given the seeds."""
 
 _EVIDENCE = """\
 - Never invent results, numbers, citations, or links. If something failed or is unknown,
@@ -90,8 +109,9 @@ GUIDES: dict[str, str] = {
   never load the held-out data.
 {_EVIDENCE}""",
     "analyst": f"""\
-- Read `results/`; compute mean and spread (std or 95% CI) over seeds; make figures in
-  `figures/` (PNG and PDF); test whether differences are meaningful given the seeds.
+- Read `results/`; compute mean and spread (std or 95% CI) over seeds; test whether
+  differences are meaningful given the seeds.
+{_FIGURES}
 - Deliverable: `reports/analysis.md` mapping every claim to the result files that support
   it, and stating negative or inconclusive findings plainly.
 - Headline results come from the sealed final evaluation in `results/final/<order id>/`;
@@ -107,14 +127,21 @@ GUIDES: dict[str, str] = {
   decisions the user must make (each with the options and the recommendation). Point to
   `reports/topic_report.md` for details.
 - Reports go to `reports/` in the charter's report language; the paper goes to `paper/`
-  (`main.tex`, `refs.bib`, figures copied in) in the charter's paper language. Start it
+  (`main.tex`, `refs.bib`) in the charter's paper language. Start it
   from the target venue's official template in `{VENUE_TEMPLATES}` (its `README.md` and
   the venue's `SOURCE.md` give the page limit and anonymity rules); if the venue is
   absent, download the official template from the venue's own site and record its URL in
   `paper/SOURCE.md`.
 - Every number in the paper must come from `results/` or `reports/analysis.md`; keep
   `paper/claims.md` mapping each claim to its source file. Use only citations from the
-  survey reports and verify each one with the literature tools.
+  survey reports and verify each one with the literature tools. Figures and tables of results
+  come only from `figures/spec.toml` (see below); never type result numbers into a table.
+{_FIGURES}
+- Include them as `\\includegraphics{{generated/<id>}}` (no width or scale: they are drawn
+  at the final width, so scaling would shrink their text; a `text`-width figure goes in
+  `figure*`) and `\\input{{generated/<id>}}` inside a `table` environment that holds the
+  caption and label (needs `\\usepackage{{booktabs}}`). Once the template is in place,
+  rerun the build so figures are redrawn for the measured column width.
 - Main results come from the sealed final evaluation (`results/final/*/SEAL.json`); report
   how many final evaluations ran and any sealed file that changed. Development and engine
   scores are labelled as such.
@@ -126,7 +153,10 @@ GUIDES: dict[str, str] = {
 - Before handing in the paper run
   `{sys.executable} -m tar_lab.cli tex check paper` (add `--page-limit N` and `--anonymous`
   as the target venue requires) and fix every FAIL; it builds a clean copy and checks the
-  log, embedded fonts, page count, bibliography and anonymity.
+  log, embedded fonts, page count, bibliography, anonymity, image resolution, and that the
+  generated figures and tables are current, unedited and reproducible. Then run
+  `{sys.executable} -m tar_lab.cli tex render paper` and look at every page with a figure
+  or table in `reports/paper_pages/`: fix overlaps, unreadable text and wasted space.
 {_EVIDENCE}""",
     "reviewer": f"""\
 - Topic review: first try to break each candidate. List at least three concrete ways its
@@ -141,7 +171,11 @@ GUIDES: dict[str, str] = {
   venue's usual meaning. Check that numbers match `results/`, that headline
   numbers come from the sealed final evaluation (`results/final/`), and that citations exist.
   Run `{sys.executable} -m tar_lab.cli tex check paper` (with the venue's `--page-limit` and
-  `--anonymous` if it is double-blind) and include its result in the review.
+  `--anonymous` if it is double-blind) and include its result in the review. Run
+  `{sys.executable} -m tar_lab.cli tex render paper`, look at every page image in
+  `reports/paper_pages/` and review each figure and table: does it show what its caption
+  and the text claim, is every label readable at print size, are the methods
+  distinguishable in grayscale, are error bars explained.
   Write `reports/final_review.md`. Do not edit the paper.
 {_EVIDENCE}""",
 }

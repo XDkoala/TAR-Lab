@@ -523,7 +523,29 @@ def build_parser() -> argparse.ArgumentParser:
                            help="maximum pages including references")
     tex_check.add_argument("--anonymous", action="store_true",
                            help="flag author names, emails, GitHub links, acknowledgements")
+    tex_check.add_argument("--workspace", type=Path, default=None,
+                           help="workspace with figures/spec.toml (default: the paper's "
+                           "parent directory)")
     tex_check.add_argument("--json", action="store_true", help="print JSON")
+    tex_render = tex.add_parser("render", help="render the built PDF's pages to PNG for "
+                                "visual review")
+    tex_render.add_argument("paper_dir", type=Path)
+    tex_render.add_argument("--main", default="main.tex")
+    tex_render.add_argument("--out", type=Path, default=None,
+                            help="output directory (default: <paper>/../reports/paper_pages)")
+    tex_render.add_argument("--dpi", type=int, default=110)
+    figs = groups.add_parser(
+        "figures", help="paper figures and tables generated from data (figures/spec.toml)"
+    ).add_subparsers(dest="command", required=True)
+    figs.add_parser("setup", help="create the pinned figures environment "
+                    "(matplotlib, numpy, pandas, scipy) with uv")
+    figs_build = figs.add_parser("build", help="run every figure/table script, copy the "
+                                 "results into <paper>/generated/, record provenance")
+    figs_build.add_argument("--workspace", type=Path, default=Path("."))
+    figs_build.add_argument("--paper", type=Path, default=None,
+                            help="paper directory (default: <workspace>/paper if present)")
+    figs_build.add_argument("--only", action="append", default=None, metavar="ID",
+                            help="build only this artifact (repeatable)")
     svc = groups.add_parser("service", help="keep a project running as a systemd user service"
                             ).add_subparsers(dest="command", required=True)
     for name, help_text in (("install", "install, enable and start the service"),
@@ -602,16 +624,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "check":
             from .tools.paper_check import check_paper
 
-            report = check_paper(args.paper_dir, args.main, args.page_limit, args.anonymous)
+            report = check_paper(args.paper_dir, args.main, args.page_limit, args.anonymous,
+                                 workspace=args.workspace)
             if args.json:
                 _print_json(report.to_dict())
             else:
                 print(report.render())
             return 0 if report.ok else 1
+        if args.command == "render":
+            from .tools.paper_check import render_pages
+
+            pdf = args.paper_dir / f"{Path(args.main).stem}.pdf"
+            if not pdf.is_file():
+                print(f"{pdf} not found: run `tarlab tex build` first", file=sys.stderr)
+                return 1
+            out = args.out or args.paper_dir.resolve().parent / "reports" / "paper_pages"
+            pages = render_pages(pdf, out, args.dpi)
+            print(f"{len(pages)} page(s) rendered to {out}")
+            return 0
         result = build_tex(args.paper_dir, args.main)
         print(f"PDF: {result.pdf} (engine: {result.engine})" if result.pdf
               else f"Build failed; see {result.log}")
         return 0 if result.pdf else 1
+    if args.group == "figures":
+        from .figures import build as figures
+
+        if args.command == "setup":
+            return figures.setup()
+        paper = args.paper or args.workspace / "paper"
+        built = figures.build(args.workspace, paper if paper.is_dir() else None, args.only)
+        print(built.render())
+        return 0 if built.ok else 1
     if args.group == "service":
         return _service_command(args)
     if args.group == "notify-test":
