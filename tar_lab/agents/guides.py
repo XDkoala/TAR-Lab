@@ -144,6 +144,13 @@ GUIDES: dict[str, str] = {
   `figure*`) and `\\input{{generated/<id>}}` inside a `table` environment that holds the
   caption and label (needs `\\usepackage{{booktabs}}`). Once the template is in place,
   rerun the build so figures are redrawn for the measured column width.
+- Method, architecture and pipeline figures are `[[diagram]]` entries (`id`, `source` =
+  a Graphviz `.dot` under `figures/diagrams/` for boxes and arrows, or a `.tex` holding a
+  `tikzpicture` for anything finer; `width` = its maximum; `claim`). Graphviz only lays it
+  out; it is drawn with LaTeX in the paper's font at 8 pt (math labels: `texlbl="$z_t$"`).
+  Show only components and connections the paper describes, label them with the paper's
+  names, and keep them narrow enough for the column (`rankdir=TB` helps); the build fails
+  when a diagram is wider than its target.
 - Main results come from the sealed final evaluation (`results/final/*/SEAL.json`); report
   how many final evaluations ran and any sealed file that changed. Development and engine
   scores are labelled as such.
@@ -156,7 +163,9 @@ GUIDES: dict[str, str] = {
   `{sys.executable} -m tar_lab.cli tex check paper` (add `--page-limit N` and `--anonymous`
   as the target venue requires) and fix every FAIL; it builds a clean copy and checks the
   log, embedded fonts, page count, bibliography, anonymity, image resolution, and that the
-  generated figures and tables are current, unedited and reproducible. Then run
+  generated figures and tables are current, unedited and reproducible. If the paper goes to
+  arXiv, also run `{sys.executable} -m tar_lab.cli tex arxiv paper`: it builds with arXiv's
+  TeX Live, checks arXiv's rules and writes the upload package `reports/arxiv.tar.gz`. Then run
   `{sys.executable} -m tar_lab.cli tex render paper` and look at every page with a figure
   or table in `reports/paper_pages/`: fix overlaps, unreadable text and wasted space.
 {_EVIDENCE}""",

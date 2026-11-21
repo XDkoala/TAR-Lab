@@ -113,10 +113,28 @@ def test_anonymity_check() -> None:
     joined = "\n".join(check.details)
     assert "author not anonymous in source and PDF: Jane Doe" in joined
     assert "email in source: jane@example.edu" in joined
-    assert "GitHub link in source: github.com/janedoe" in joined
+    assert "GitHub link presented as the authors' own in source: github.com/janedoe" in joined
     assert "acknowledgements section in source" in joined
     assert "acknowledgements heading in PDF" in joined
     assert "source only" in pc.anonymity_check(leaky, None).summary
+
+
+def test_anonymity_ignores_cited_and_third_party_links() -> None:
+    tex = ("\\author{Anonymous}\nWe build on github.com/facebookresearch/dino and the planner "
+           "of \\cite{icem}. Our code is available at https://github.com/janedoe/wm.\n")
+    pdf = ("Anonymous\nWe build on github.com/facebookresearch/dino. Our code is available at "
+           "github.com/janedoe/wm.\nReferences\n[1] iCEM. github.com/martius-lab/iCEM. "
+           "contact: m@tue.mpg.de\n")
+    bib = "@misc{icem, url = {https://github.com/martius-lab/iCEM}, note = {m@tue.mpg.de}}"
+    check = pc.anonymity_check(tex, pdf, bib)
+    assert check.status == "WARN"
+    assert check.details == [
+        "GitHub link presented as the authors' own in source: github.com/janedoe",
+        "GitHub link presented as the authors' own in PDF: github.com/janedoe"]
+    assert "3 cited or third-party" in check.summary
+    third_party_only = tex.replace("Our code is available at https://github.com/janedoe/wm.",
+                                   "")
+    assert pc.anonymity_check(third_party_only, None, bib).status == "PASS"
 
 
 def test_copy_sources_excludes_build_products(tmp_path: Path) -> None:
@@ -136,7 +154,8 @@ def test_check_without_engine_or_poppler(tmp_path: Path, monkeypatch: pytest.Mon
     (tmp_path / "main.tex").write_text("\\documentclass{article}\\begin{document}x"
                                        "\\cite{a}\\end{document}\n")
 
-    def fake_build(paper_dir: Path, main: str = "main.tex", timeout: float = 600) -> TexBuild:
+    def fake_build(paper_dir: Path, main: str = "main.tex", timeout: float = 600,
+                   **_: object) -> TexBuild:
         (paper_dir / "main.log").write_text("LaTeX Warning: Citation `a' on page 1 undefined\n")
         (paper_dir / "main.pdf").write_text("%PDF")
         (paper_dir / "build.log").write_text("ok\n")

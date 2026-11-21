@@ -70,7 +70,7 @@ def artifact_check(workspace: Path, paper_dir: Path, rebuild: bool = True) -> Ch
         issues.append("rerun `tarlab figures build` (never edit generated files)")
     note = ""
     if rebuild and not stale:
-        if fb.figures_python() is None:
+        if fb.figures_python() is None and any(a.kind != "diagram" for a in spec.artifacts):
             note = "; rebuild skipped (no figures environment)"
         else:
             layout = prov.get("layout") or fb.DEFAULT_LAYOUT

@@ -340,6 +340,16 @@ _ACK_TEX = re.compile(r"\\(?:section|subsection|paragraph)\*?\s*\{\s*Acknowledge
                       r"|\\begin\{ack(?:s|nowledge?ments?)?\}|\\acks\b", re.IGNORECASE)
 _ACK_PDF = re.compile(r"^\s*(?:\d+\.?\s*)?Acknowledge?ments?\b", re.IGNORECASE | re.MULTILINE)
 _ANON_WORDS = re.compile(r"anonym|blind|submission|withheld", re.IGNORECASE)
+# Phrases near a link that present it as the authors' own (code release, project page).
+_SELF = re.compile(
+    r"\bour\s+(?:\w+\s+){0,2}?(?:code|implementation|repository|repo|project|website|page|"
+    r"software|library|models?|data(?:set)?|benchmark)s?\b|"
+    r"\bwe\s+(?:will\s+)?(?:release|open[- ]source|publish|provide|make)|"
+    r"(?:code|implementation|data(?:set)?|models?|software)\s+(?:is|are|will be)"
+    r"\s+(?:publicly\s+|freely\s+)?(?:available|released)|available (?:at|from|on)|"
+    r"project page|\b(?:code|project|website|homepage|repository)\s*:",
+    re.IGNORECASE)
+SELF_BEFORE, SELF_AFTER = 120, 60  # characters around a link searched for _SELF
 
 
 def author_blocks(tex: str) -> list[str]:
@@ -357,8 +367,21 @@ def _plain(tex: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def anonymity_check(tex: str, pdf_text: str | None) -> Check:
+def _owner(link: str) -> str:
+    return link.split("/", 1)[1].lower() if "/" in link else link.lower()
+
+
+def anonymity_check(tex: str, pdf_text: str | None, bib_text: str = "") -> Check:
+    """Author block, emails, GitHub links and acknowledgements that could identify authors.
+
+    Links and emails that come from the bibliography (the same GitHub owner or email occurs in
+    a ``.bib`` file) are citations of other people's work and are ignored, as are GitHub links
+    whose surrounding text does not present them as the authors' own (``our code``, ``we
+    release``, ``available at``, ``project page``, ...); both are counted in the summary."""
     issues: list[str] = []
+    cited_owners = {_owner(link) for link in _GITHUB.findall(bib_text)}
+    cited_emails = {e.lower() for e in _EMAIL.findall(bib_text)}
+    ignored: set[str] = set()
     for block in author_blocks(tex):
         plain = _plain(block)
         if plain and not _ANON_WORDS.search(plain):
@@ -372,14 +395,33 @@ def anonymity_check(tex: str, pdf_text: str | None) -> Check:
             issues.append(f"\\author not anonymous {where}: {plain[:80]}")
     for label, text in (("source", tex), ("PDF", pdf_text or "")):
         for email in _dedupe(_EMAIL.findall(text)):
-            issues.append(f"email in {label}: {email}")
-        for link in _dedupe(_GITHUB.findall(text)):
-            issues.append(f"GitHub link in {label}: {link}")
+            if email.lower() in cited_emails:
+                ignored.add(email.lower())
+            else:
+                issues.append(f"email in {label}: {email}")
+        flagged: set[str] = set()
+        for m in _GITHUB.finditer(text):
+            link = m.group(0)
+            owner = _owner(link)
+            before = text[max(0, m.start() - SELF_BEFORE):m.start()]
+            # Only the sentence the link is in: a full stop ends the context.
+            before = re.split(r"[.!?]\s", before)[-1]
+            after = re.split(r"[.!?]\s", text[m.end():m.end() + SELF_AFTER])[0]
+            context = before + after
+            if owner in cited_owners or not _SELF.search(context):
+                ignored.add(owner)
+            elif owner not in flagged:
+                flagged.add(owner)
+                issues.append(f"GitHub link presented as the authors' own in {label}: {link}")
+        ignored -= flagged
     if _ACK_TEX.search(tex):
         issues.append("acknowledgements section in source")
     if pdf_text and _ACK_PDF.search(pdf_text):
         issues.append("acknowledgements heading in PDF")
     note = "" if pdf_text is not None else " (pdftotext unavailable: source only)"
+    if ignored:
+        note += (f"; {len(ignored)} cited or third-party link(s)/email(s) ignored: "
+                 + ", ".join(sorted(ignored)[:5]) + (" ..." if len(ignored) > 5 else ""))
     return Check("anonymity", WARN if issues else PASS,
                  (f"{len(issues)} possible identity leak(s)" if issues
                   else "no author names, emails, GitHub links or acknowledgements") + note,
@@ -403,11 +445,15 @@ def copy_sources(src: Path, dst: Path, main: str = "main.tex") -> None:
 
 def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None = None,
                 anonymous: bool = False, timeout: float = 600,
-                workspace: Path | None = None) -> CheckReport:
+                workspace: Path | None = None, arxiv: bool = False,
+                arxiv_out: Path | None = None) -> CheckReport:
     """``workspace`` (default: the paper's parent) holds ``figures/spec.toml``; when it
-    exists, generated figures and tables are checked too."""
+    exists, generated figures and tables are checked too. ``arxiv`` builds with arXiv's TeX
+    Live, then checks the package of files the build read (:mod:`tar_lab.tools.arxiv`),
+    written to ``arxiv_out`` as ``.tar.gz`` when given."""
     from ..figures import audit
     from ..figures.build import SPEC, insert_layout_probe, parse_layout
+    from . import arxiv as ax
 
     paper_dir = paper_dir.resolve()
     workspace = (workspace or paper_dir.parent).resolve()
@@ -418,8 +464,39 @@ def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None 
         work = Path(tmp) / "paper"
         copy_sources(paper_dir, work, main)
         insert_layout_probe(work / main)
-        result = build(work, main, timeout=timeout)
         checks: list[Check] = []
+        texlive_bin = None
+        if arxiv:
+            texlive_bin = ax.find_arxiv_texlive_bin()
+            checks.append(Check("arxiv texlive", PASS, f"TeX Live {ax.ARXIV_TEXLIVE_YEAR} "
+                                f"(arXiv's default): {texlive_bin}") if texlive_bin else
+                          Check("arxiv texlive", WARN, f"arXiv's TeX Live "
+                                f"{ax.ARXIV_TEXLIVE_YEAR} not found in "
+                                f"{ax.LOCAL_ARXIV_TEXLIVE}; built with the local TeX Live "
+                                "instead (see README)"))
+        result = build(work, main, timeout=timeout, texlive_bin=texlive_bin)
+        if arxiv and result.pdf:
+            first = work
+            files = ax.package_files(first, main, bib_files(first, read_sources(first)))
+            work = Path(tmp) / "arxiv"
+            size = ax.make_package(first, files, work)
+            shutil.copyfile(paper_dir / main, work / main)  # without the layout probe
+            if arxiv_out is not None:
+                ax.write_tarball(work, files, arxiv_out)
+            sources = {p.relative_to(paper_dir).as_posix() for p in paper_dir.rglob("*")
+                       if p.is_file()}
+            unused = sorted(sources - set(files) - {f"{Path(main).stem}.pdf", "build.log"}
+                            - {n for n in sources if any(fnmatch.fnmatch(Path(n).name, p)
+                                                         for p in BUILD_PRODUCTS)})
+            checks.append(ax.rule_check(paper_dir, read_sources(work), files, size, unused))
+            insert_layout_probe(work / main)
+            packaged = build(work, main, timeout=timeout, texlive_bin=texlive_bin)
+            if packaged.pdf is None:
+                tail = packaged.log.read_text(encoding="utf-8",
+                                              errors="replace").splitlines()[-10:]
+                checks.append(Check("arxiv package", FAIL, "the package of recorded inputs "
+                                    "does not build on its own", tail))
+            result = packaged
         if result.pdf:
             checks.append(Check("build", PASS,
                                 f"built from a clean copy with {result.engine}"))
@@ -456,7 +533,9 @@ def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None 
             checks.append(audit.artifact_check(workspace, paper_dir))
             checks.append(audit.size_check(workspace, tex, layout))
         if anonymous:
-            checks.append(anonymity_check(tex, pdf_text))
+            bib_text = "\n".join(f.read_text(encoding="utf-8", errors="replace")
+                                 for f in bib_files(work, tex))
+            checks.append(anonymity_check(tex, pdf_text, bib_text))
     return CheckReport(str(paper_dir), main, result.engine, checks)
 
 

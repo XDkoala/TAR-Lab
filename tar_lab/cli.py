@@ -480,6 +480,10 @@ def build_parser() -> argparse.ArgumentParser:
     lit_search.add_argument("query")
     lit_search.add_argument("--limit", type=int, default=10)
     lit_search.add_argument("--year-from", type=int)
+    lit_status = lit.add_parser("status", help="is literature search configured? (no secrets)")
+    lit_status.add_argument("--online", action="store_true",
+                            help="make one minimal request per source")
+    lit_status.add_argument("--json", action="store_true")
 
     engine = groups.add_parser("engine", help="AI-Scientist-v3 engine").add_subparsers(
         dest="command", required=True)
@@ -526,7 +530,15 @@ def build_parser() -> argparse.ArgumentParser:
     tex_check.add_argument("--workspace", type=Path, default=None,
                            help="workspace with figures/spec.toml (default: the paper's "
                            "parent directory)")
+    tex_check.add_argument("--arxiv", action="store_true",
+                           help="build with arXiv's TeX Live and check the upload package")
     tex_check.add_argument("--json", action="store_true", help="print JSON")
+    tex_arxiv = tex.add_parser("arxiv", help="write the arXiv upload package (.tar.gz) after "
+                               "the --arxiv check")
+    tex_arxiv.add_argument("paper_dir", type=Path)
+    tex_arxiv.add_argument("--main", default="main.tex")
+    tex_arxiv.add_argument("-o", "--out", type=Path, default=None,
+                           help="default: <paper>/../reports/arxiv.tar.gz")
     tex_render = tex.add_parser("render", help="render the built PDF's pages to PNG for "
                                 "visual review")
     tex_render.add_argument("paper_dir", type=Path)
@@ -612,6 +624,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.group == "order":
         return _order_command(args)
     if args.group == "literature":
+        if args.command == "status":
+            from .integrations.literature.status import run as literature_status
+
+            text, code = literature_status(args.online, args.json)
+            print(text)
+            return code
         from .integrations.literature import Literature
         from .integrations.literature.server import run_stdio as literature_stdio
 
@@ -625,12 +643,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .tools.paper_check import check_paper
 
             report = check_paper(args.paper_dir, args.main, args.page_limit, args.anonymous,
-                                 workspace=args.workspace)
+                                 workspace=args.workspace, arxiv=args.arxiv)
             if args.json:
                 _print_json(report.to_dict())
             else:
                 print(report.render())
             return 0 if report.ok else 1
+        if args.command == "arxiv":
+            from .tools.paper_check import check_paper
+
+            out = args.out or args.paper_dir.resolve().parent / "reports" / "arxiv.tar.gz"
+            out.unlink(missing_ok=True)
+            report = check_paper(args.paper_dir, args.main, arxiv=True, arxiv_out=out)
+            print(report.render())
+            if report.ok and out.is_file():
+                print(f"arXiv package: {out}")
+                return 0
+            out.unlink(missing_ok=True)
+            print("No package written: fix the FAILs above.", file=sys.stderr)
+            return 1
         if args.command == "render":
             from .tools.paper_check import render_pages
 

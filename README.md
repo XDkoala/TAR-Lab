@@ -67,11 +67,13 @@ uv run ruff check . && uv run mypy src tests && uv run pytest -q -n auto
   不建立 `/usr/local/bin` 符号链接，也不改 `PATH`；TAR-Lab 直接调用 `.tools/texlive/<年份>/bin/x86_64-linux`（有多个年份时用最新的）。
 - 投稿前检查：`tarlab tex check paper [--page-limit 8] [--anonymous] [--json]` 把论文目录（去掉 `.aux`、`.log`、`.bbl`、`main.pdf` 等编译产物）复制到临时目录重新编译，确认源码自包含，再检查：日志里的 LaTeX 错误、未定义的引用和交叉引用、缺失文件、超过 1pt 的 overfull \hbox、字体替换；`pdffonts` 是否全部嵌入、有没有 Type 3 字体；`pdfinfo` 页数（含参考文献）；`\cite` 的键是否都在 `.bib` 里、条目是否缺标题或年份；`--anonymous` 时查作者、邮箱、`github.com/<用户>` 链接和致谢。每项 PASS/WARN/FAIL/SKIP，有 FAIL 时退出码为 1；没装 poppler（`pdffonts` 等）时对应项为 SKIP。
   在论文目录的上一级（工作区）有 `figures/spec.toml` 时，还会检查生成的图表：是否都已生成；脚本和输入数据自上次生成后有没有改动；`paper/generated/` 里的文件有没有被手改；在临时目录重新生成一遍能否逐字节复现；主要结果的图表是否只读了 `results/final/`（以上任一不满足为 FAIL）。另外检查图是否按论文实际栏宽绘制且没有被缩放、手写表格里有没有直接敲进去的小数、位图分辨率是否低于 300 ppi（这几项为 WARN）。
+- arXiv 检查：`tarlab tex check paper --arxiv` 用 `texlive-arxiv/2025`（arXiv 现在默认的 TeX Live 2025，冻结在 arXiv 采用的 2025-08-03 状态）先编译一遍，再按 latexmk 的记录文件（`main.fls`）只挑出编译时实际读到的文件，加上 `.bbl` 和 `.bib`，单独再编译一次，确认上传包自包含。另外按 arXiv 的 TeX Live 2025 说明检查：`\input` 等用了绝对路径或 `..`、hyperxmp 先于 hyperref 加载、minted 缺 `_minted` 目录、上传包超过 50 MiB（这些为 FAIL）；cleveref 配 `\newtheorem`、把 `\doublespace` 当命令用、隐藏文件、文件名含特殊字符（这些为 WARN）；论文目录里没用到的文件会列出来，不放进包。`tarlab tex arxiv paper [-o reports/arxiv.tar.gz]` 检查通过后写出可直接上传的 `.tar.gz`（文件顺序、时间戳固定）。没装 TeX Live 2025 时用本地 2026 编译并给出 WARN。用 `TARLAB_ARXIV_TEXLIVE_BIN` 可以指定别的目录。
 - 页面渲染：`tarlab tex render paper [--dpi 110]` 把已编译的 PDF 每页渲染成 PNG，放到 `reports/paper_pages/`，供写作者和审稿人看图检查。
 - `figures/venv`：画论文图表专用的 Python 3.11 环境（matplotlib、numpy、pandas、scipy，版本和哈希锁在 `tar_lab/figures/requirements.lock`），用 `tarlab figures setup` 创建，可用 `TARLAB_FIGURES_PYTHON` 指定别的解释器。`tarlab figures build` 按工作区的 `figures/spec.toml` 逐个运行图表脚本：
   - 脚本只能读自己声明的输入文件和 `figures/` 下的代码，只能写自己的输出目录，不能启动子进程（Python 审计钩子强制执行）；
   - 图按目标模板实测的 `\columnwidth`/`\textwidth` 绘制（测量结果按导言区哈希缓存），字体与正文接近（默认 Times 风格的 STIX，可选 Computer Modern 或无衬线），字体以 TrueType 嵌入，没有 Type 3；
   - 输出写到 `figures/out/<id>/`（PDF、300 dpi 的 PNG 预览、表格 `.tex` 片段），论文用到的文件复制到 `paper/generated/`；脚本、输入、输出的哈希记在 `figures/out/provenance.json`。输出逐字节确定，所以 `tex check` 能重新生成并比对。
+  - 结构图和方法图用 `[[diagram]]`：源文件是 Graphviz 的 `.dot`（只用它算布局，再转成 TikZ）或直接写 `tikzpicture` 的 `.tex`，用 pdfLaTeX 按正文字体、8 pt 编译成 PDF，保持自然大小，超过目标宽度就报错。编译在只含源文件和声明输入的临时目录里进行（`openin_any=p`），PDF 元数据固定，输出逐字节确定。
   规格格式和脚本辅助函数见 `tar_lab/figures/build.py` 和 `tar_lab/figures/runtime/tarlab_fig.py` 的文档字符串。
 - `tectonic/bin/tectonic`：备用引擎，只在找不到 TeX Live 时使用。Tectonic 0.17.0（`tectonic-0.17.0-x86_64-unknown-linux-gnu.tar.gz`，SHA-256 `1a715688baf591e650c8aeb160ae934e181685eecbb38b317de30b269ac5d606`），基于 XeTeX，字体和断行可能与会议用的 `pdflatex` 不同；第一次编译会自动下载用到的宏包。可用 `TARLAB_TECTONIC` 指定路径。
 
@@ -154,6 +156,7 @@ Undermind 不可用时，Agent 用 `literature` 工具查 OpenAlex、Semantic Sc
 
   支持的键：`TARLAB_S2_API_KEY`（或 `SEMANTIC_SCHOLAR_API_KEY`）、`TARLAB_OPENALEX_API_KEY`（或 `OPENALEX_API_KEY`）、`TARLAB_OPENALEX_MAILTO`。同名环境变量优先于文件。文件对其他用户可读时会在 stderr 提醒你 `chmod 600`；密钥本身不会写进日志。
 - **限速**：最多 3 张工单并行，各有自己的文献服务进程，所以本机所有进程共用一个限速器（`~/.local/state/tar-lab/rate/`，遵循 `XDG_STATE_HOME`）：Semantic Scholar 两次请求至少间隔 1.05 秒（有没有密钥都一样，可用 `TARLAB_S2_MIN_INTERVAL` 调整），arXiv 至少间隔 3 秒（`TARLAB_ARXIV_MIN_INTERVAL`）。遇到 429/503 时按服务器的 `Retry-After` 等待（最多 60 秒），没有这个头就指数退避。
+- **检查配置**：`tarlab literature status` 显示密钥文件路径与权限（不是 0600 会警告）、Semantic Scholar / OpenAlex 密钥和 mailto 是否已设置及来源（环境变量名或文件，密钥最多只显示末 4 位）、各来源的最小请求间隔和距上次请求的时间。加 `--online` 会对每个来源发一次最小请求（走同一套请求头、密钥和限速器），报告 OK / HTTP 状态 / 错误和延迟；带密钥时 401/403 表示密钥无效，全部失败时退出码为 1。加 `--json` 输出 JSON。
 
 ## 引擎与上游
 

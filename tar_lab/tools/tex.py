@@ -79,9 +79,10 @@ def latexmk_command(main: str, latexmk: str = "latexmk") -> list[str]:
             "-file-line-error", main]
 
 
-def select_engine(main: str) -> TexEngine:
-    """Pick the TeX engine; raises FileNotFoundError when there is none."""
-    bin_dir = find_texlive_bin()
+def select_engine(main: str, texlive_bin: Path | None = None) -> TexEngine:
+    """Pick the TeX engine (``texlive_bin`` forces a TeX Live bin directory); raises
+    FileNotFoundError when there is none."""
+    bin_dir = texlive_bin or find_texlive_bin()
     if bin_dir:
         return TexEngine("texlive", latexmk_command(main, str(bin_dir / "latexmk")), bin_dir)
     latexmk, pdflatex = shutil.which("latexmk"), shutil.which("pdflatex")
@@ -106,18 +107,22 @@ def build_command(main: str) -> list[str]:
     return select_engine(main).command
 
 
-def build(paper_dir: Path, main: str = "main.tex", timeout: float = 600) -> TexBuild:
+def build(paper_dir: Path, main: str = "main.tex", timeout: float = 600,
+          env: dict[str, str] | None = None, texlive_bin: Path | None = None) -> TexBuild:
+    """Compile ``main`` in ``paper_dir``; ``env`` adds environment variables (e.g. kpathsea's
+    ``openin_any``)."""
     paper_dir = paper_dir.resolve()
     log = paper_dir / "build.log"
     with log.open("w", encoding="utf-8") as out:
         try:
-            engine = select_engine(main)
+            engine = select_engine(main, texlive_bin)
         except FileNotFoundError as exc:
             out.write(f"{exc}\n")
             return TexBuild(None, log, 127)
         out.write(f"[tarlab] engine: {engine.describe()}\n")
         out.flush()
-        env = dict(os.environ)
+        extra = env or {}
+        env = {**os.environ, **extra}
         # Unwrapped log lines keep citation keys and file names intact for `tex check`.
         env["max_print_line"] = "10000"
         if engine.bin_dir:

@@ -24,6 +24,12 @@ A workspace declares its artifacts in ``figures/spec.toml``::
     inputs = ["results/final/o12/metrics.json"]
     headline = true
 
+    [[diagram]]              # structure/method figure, see tar_lab.figures.diagram
+    id = "method_overview"
+    source = "figures/diagrams/method.dot"   # Graphviz (.dot/.gv) or a tikzpicture (.tex)
+    width = "column"         # maximum width; the diagram keeps its natural size
+    claim = "The planner queries the frozen world model only through the cost head."
+
 ``build`` runs every script with the dedicated figures interpreter under a guard that lets
 it read only its inputs (:mod:`tar_lab.figures.runtime.tarlab_runner`), writes the outputs
 to ``figures/out/<id>/``, copies the paper files (``<id>.pdf``, ``<id>.tex``) into
@@ -49,6 +55,8 @@ from typing import Any
 
 from ..tools.tex import LOCAL_TOOLS
 from ..tools.tex import build as build_tex
+from .diagram import SUFFIXES, DiagramError
+from .diagram import render as render_diagram
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 RUNNER = PACKAGE_DIR / "runtime" / "tarlab_runner.py"
@@ -108,11 +116,15 @@ class Artifact:
     claim: str = ""
 
     def outputs(self) -> list[str]:
-        return [f"{self.id}.pdf", f"{self.id}.png"] if self.kind == "figure" else [
-            f"{self.id}.tex"]
+        """Files the build must produce (diagrams add a PNG preview when pdftoppm exists)."""
+        if self.kind == "figure":
+            return [f"{self.id}.pdf", f"{self.id}.png"]
+        if self.kind == "diagram":
+            return [f"{self.id}.pdf", f"{self.id}.tikz.tex"]
+        return [f"{self.id}.tex"]
 
     def paper_outputs(self) -> list[str]:
-        return [f"{self.id}.pdf"] if self.kind == "figure" else [f"{self.id}.tex"]
+        return [f"{self.id}.tex"] if self.kind == "table" else [f"{self.id}.pdf"]
 
 
 @dataclass
@@ -159,7 +171,7 @@ def load_spec(workspace: Path) -> Spec:
         methods = []
     artifacts: list[Artifact] = []
     seen: set[str] = set()
-    for kind in ("figure", "table"):
+    for kind in ("figure", "table", "diagram"):
         for i, item in enumerate(raw.get(kind, [])):
             where = f"[[{kind}]] #{i + 1}"
             ident = item.get("id")
@@ -170,12 +182,15 @@ def load_spec(workspace: Path) -> Spec:
             if ident in seen:
                 errors.append(f"{where}: duplicate id")
             seen.add(ident)
-            script = _relative(workspace, item.get("script"), f"{where} script", errors)
+            key = "source" if kind == "diagram" else "script"
+            script = _relative(workspace, item.get(key), f"{where} {key}", errors)
             if script and (not script.startswith("figures/") or script.startswith(
                     OUT.as_posix() + "/")):
-                errors.append(f"{where}: script must live under figures/ (not figures/out/)")
+                errors.append(f"{where}: {key} must live under figures/ (not figures/out/)")
+            if kind == "diagram" and script and not script.lower().endswith(SUFFIXES):
+                errors.append(f"{where}: source must end in {', '.join(SUFFIXES)}")
             raw_inputs = item.get("inputs", [])
-            if not isinstance(raw_inputs, list) or not raw_inputs:
+            if not isinstance(raw_inputs, list) or (not raw_inputs and kind != "diagram"):
                 errors.append(f"{where}: inputs must list the data files it reads")
                 raw_inputs = []
             inputs = [p for j, v in enumerate(raw_inputs)
@@ -390,6 +405,20 @@ def _run_artifact(python: Path, workspace: Path, artifact: Artifact, out_dir: Pa
                   outputs={n: file_sha256(out_dir / n) for n in artifact.outputs()})
 
 
+def _run_diagram(workspace: Path, artifact: Artifact, out_dir: Path,
+                 layout: dict[str, Any], font: str) -> Result:
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+    try:
+        names, width = render_diagram(workspace, artifact.script, artifact.inputs, out_dir,
+                                      artifact.id, font, width_in(artifact, layout))
+    except DiagramError as exc:
+        return Result(artifact.id, False, str(exc))
+    note = f"{width:.2f} in wide" if width is not None else ""
+    return Result(artifact.id, True, note, {n: file_sha256(out_dir / n) for n in names})
+
+
 def build(workspace: Path, paper_dir: Path | None = None, only: list[str] | None = None,
           out_root: Path | None = None, layout: dict[str, Any] | None = None,
           main: str = "main.tex") -> BuildReport:
@@ -404,21 +433,26 @@ def build(workspace: Path, paper_dir: Path | None = None, only: list[str] | None
         layout, source = resolve_layout(workspace, spec, paper_dir, main)
     report = BuildReport([], layout, source, list(spec.errors), figure_font(spec, layout))
     python = figures_python()
-    if python is None:
+    selected = [a for a in spec.artifacts if not only or a.id in only]
+    if python is None and any(a.kind != "diagram" for a in selected):
         report.errors.append("figures environment not found: run `tarlab figures setup`")
     if report.errors:
         return report
-    assert python is not None
     unknown = sorted(set(only or []) - {a.id for a in spec.artifacts})
     if unknown:
         report.errors.append(f"unknown artifact id(s): {', '.join(unknown)}")
         return report
     root = out_root or workspace / OUT
     font = figure_font(spec, layout)
-    selected = [a for a in spec.artifacts if not only or a.id in only]
     for artifact in selected:
-        report.results.append(_run_artifact(python, workspace, artifact, root / artifact.id,
-                                            layout, font, spec.methods))
+        if artifact.kind == "diagram":
+            report.results.append(_run_diagram(workspace, artifact, root / artifact.id,
+                                               layout, font))
+        else:
+            assert python is not None
+            report.results.append(_run_artifact(python, workspace, artifact,
+                                                root / artifact.id, layout, font,
+                                                spec.methods))
     if not scratch:
         _record(workspace, spec, selected, report, paper_dir, font)
     return report
