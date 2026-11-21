@@ -233,13 +233,28 @@ def _main_executor(executors: Mapping[str, object]) -> str:
     return name
 
 
+def _dispatcher_executor(executors: Mapping[str, object], main: str) -> str | None:
+    """Routine wake-ups (routine orders finished cleanly) go to a cheaper second main agent,
+    Codex by default. ``TARLAB_DISPATCHER=none`` sends everything to the main agent."""
+    name = os.environ.get("TARLAB_DISPATCHER", "").strip() or "codex"
+    if name == "none" or name == main:
+        return None
+    if not callable(getattr(executors.get(name), "ask", None)):
+        raise SystemExit(f"TARLAB_DISPATCHER: {name!r} cannot run the dispatcher "
+                         "(use codex, devin or none)")
+    return name
+
+
 def _lab(root: Path) -> Lab:
     kernel = _kernel(root)
-    model = kernel.executors[_main_executor(kernel.executors)]
-    agent = MainAgent(cast(JsonModel, model), kernel.project.root,
-                      describe(kernel.project.root))
+    main = _main_executor(kernel.executors)
+    machine = describe(kernel.project.root)
+    agent = MainAgent(cast(JsonModel, kernel.executors[main]), kernel.project.root, machine)
+    second = _dispatcher_executor(kernel.executors, main)
+    dispatcher = None if second is None else MainAgent(
+        cast(JsonModel, kernel.executors[second]), kernel.project.root, machine)
     return Lab(kernel, agent, default_notifier(), tiers=_tiers(kernel.executors),
-               check_requirements=True)
+               check_requirements=True, dispatcher=dispatcher)
 
 
 def _ask(q: Question) -> str:

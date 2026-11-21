@@ -175,3 +175,14 @@ def test_main_agent_defaults_to_devin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TARLAB_MAIN", "ai-scientist")
     with pytest.raises(SystemExit):
         _main_executor(executors)
+
+
+def test_dispatcher_defaults_to_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tar_lab.cli import _dispatcher_executor, _executors
+
+    executors = _executors()
+    monkeypatch.delenv("TARLAB_DISPATCHER", raising=False)
+    assert _dispatcher_executor(executors, "devin") == "codex"
+    assert _dispatcher_executor(executors, "codex") is None  # same model: no point
+    monkeypatch.setenv("TARLAB_DISPATCHER", "none")
+    assert _dispatcher_executor(executors, "devin") is None

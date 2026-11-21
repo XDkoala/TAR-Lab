@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
 from tar_lab.agents.main_agent import Decision, JsonModel, MainAgent, Question, compact
@@ -23,7 +24,7 @@ from tar_lab.core import preflight, seal
 from tar_lab.core.charter import APPROVAL_POINTS, Charter
 from tar_lab.core.ledger import Event, Ledger
 from tar_lab.core.pricing import Spend, project_spend
-from tar_lab.core.workorder import Limits, WorkOrder
+from tar_lab.core.workorder import Limits, Usage, WorkOrder
 from tar_lab.i18n import pick
 from tar_lab.integrations.ai_scientist.task import task_problems
 from tar_lab.integrations.cli_agents.process import quota_error
@@ -32,6 +33,27 @@ from .kernel import Kernel
 from .notify import ConsoleNotifier, NotificationError, Notifier
 
 _T = TypeVar("_T")
+
+
+# Roles whose clean finish is routine enough for the dispatcher; designer, reviewer and
+# analyst results need the main agent's judgement.
+ROUTINE_ROLES = frozenset({"researcher", "engineer", "writer"})
+INTERIM_REVIEW_TIER = "medium"
+
+
+def _main_only(decision: Decision) -> str:
+    """Why a dispatcher decision must go to the main agent instead ("" if it may stand)."""
+    if decision.ask_user:
+        return "asks the user"
+    if decision.finish:
+        return "proposes to finish"
+    if decision.charter_changes:
+        return "changes the charter"
+    if decision.cancel_orders:
+        return "cancels orders"
+    if any(o.get("kind") == "final_eval" for o in decision.orders):
+        return "dispatches the final evaluation"
+    return ""
 
 
 def _executor_of(agent: MainAgent) -> str:
@@ -98,6 +120,8 @@ class Lab:
     max_parallel: int = MAX_PARALLEL_ORDERS
     # Check each stage's host tools before dispatching it (tar_lab.core.preflight).
     check_requirements: bool = False
+    # Optional second main agent on a cheaper model for routine wake-ups (see ``_route``).
+    dispatcher: MainAgent | None = None
     _workers: dict[str, threading.Thread] = field(default_factory=dict, init=False, repr=False)
     _recovered: bool = field(default=False, init=False, repr=False)
 
@@ -512,9 +536,14 @@ class Lab:
     def _decide(self, charter: Charter) -> LabStatus:
         n = len(self._events("pi.decision")) + 1
         log_dir = self.kernel.project.root / "pi" / f"decision-{n:03d}"
+        context = self.context(charter)
+        route, reason = self._route()
+        if route == "dispatcher" and (early := self._dispatch(context, log_dir, reason)):
+            decision, usage, agent = early
+            return self._record_decision(decision, usage, agent, charter, "dispatcher", reason)
         agent = self._main()
         try:
-            decision, usage = agent.decide(self.context(charter), log_dir)
+            decision, usage = agent.decide(context, log_dir)
         except (RuntimeError, TypeError, KeyError, ValueError, OSError) as exc:
             if quota_error(str(exc)):
                 self.kernel.mark_unavailable(_executor_of(agent), str(exc))
@@ -526,11 +555,65 @@ class Lab:
                 return self._suspend(f"The main agent failed {MAX_DECISION_ERRORS} times: {exc}")
             self._notify("Main agent error (will retry)", str(exc)[:2000])
             return "error"
+        return self._record_decision(decision, usage, agent, charter, "main", reason)
+
+    def _record_decision(self, decision: Decision, usage: Usage, agent: MainAgent,
+                         charter: Charter, by: str, reason: str) -> LabStatus:
         ev = self.ledger.append("pi.decision", None,
                                 {"decision": decision.to_dict(), "usage": asdict(usage),
-                                 "model": _model_of(agent)})
+                                 "model": _model_of(agent), "agent": by, "route": reason})
         self._apply(ev, charter)
         return self.status() or "working"
+
+    def _route(self) -> tuple[str, str]:
+        """Which main agent takes this wake-up. Only orders of routine roles that finished
+        cleanly go to the dispatcher; talking with the user, failures, judgement roles,
+        deadlines, budget and anything else stay with the main agent."""
+        if self.dispatcher is None:
+            return "main", "single main agent"
+        since = self._last_seq("pi.decision")
+        if since == 0:
+            return "main", "first plan"
+        orders = self.ledger.orders()
+        triggers = [e for e in self.ledger.events() if e.seq > since and (
+            e.kind in WAKE or e.kind in ("lab.error", "lab.order_rejected"))]
+        if not triggers:
+            return "main", "re-check"
+        for e in triggers:
+            if e.kind != "order.finished":
+                return "main", e.kind
+            state = orders.get(e.order_id or "")
+            if e.payload["result"]["status"] != "done":
+                return "main", f"order {e.order_id} {e.payload['result']['status']}"
+            if state is None or state.order.role not in ROUTINE_ROLES or state.order.params.get(
+                    "final_eval") or state.order.executor == ENGINE_EXECUTOR:
+                return "main", f"{state.order.role if state else '?'} order finished"
+        return "dispatcher", "routine orders finished"
+
+    def _dispatch(self, context: str, log_dir: Path,
+                  reason: str) -> tuple[Decision, Usage, MainAgent] | None:
+        """Ask the dispatcher; ``None`` hands the step to the main agent (escalation,
+        forbidden actions, quota or errors), recording the discarded answer and its usage."""
+        assert self.dispatcher is not None
+        agent = self.dispatcher
+        if _executor_of(agent) in self.kernel.unavailable():
+            return None
+        try:
+            decision, usage = agent.decide(context, log_dir.with_name(log_dir.name + "-d"),
+                                           dispatcher=True)
+        except (RuntimeError, TypeError, KeyError, ValueError, OSError) as exc:
+            if quota_error(str(exc)):
+                self.kernel.mark_unavailable(_executor_of(agent), str(exc))
+            self.ledger.append("pi.escalated", None, {"reason": f"dispatcher error: {exc}"[:500],
+                                                      "model": _model_of(agent)})
+            return None
+        why = decision.escalate.strip() or _main_only(decision)
+        if why:
+            self.ledger.append("pi.escalated", None, {
+                "reason": why[:500], "route": reason, "decision": decision.to_dict(),
+                "usage": asdict(usage), "model": _model_of(agent)})
+            return None
+        return decision, usage, agent
 
     def _apply(self, ev: Event, charter: Charter) -> None:
         decision = Decision.from_dict(ev.payload["decision"])
@@ -588,10 +671,11 @@ class Lab:
             name = self.tiers[card.tier]
             roles_on[name] = roles_on.get(name, frozenset()) | {role}
         executors = set(roles_on)
-        agent = self._agent_executor()
-        if agent in ("codex", "devin"):
-            executors.add(agent)
-            roles_on[agent] = preflight.ALL_ROLES  # the main agent decides for every stage
+        agents = [self.agent, *([self.dispatcher] if self.dispatcher else [])]
+        for agent in map(_executor_of, agents):
+            if agent in ("codex", "devin"):
+                executors.add(agent)
+                roles_on[agent] = preflight.ALL_ROLES  # the main agents decide for every stage
         return preflight.requirements(executors, roles_on)
 
     def _preflight_report(self, charter: Charter) -> None:
@@ -618,12 +702,30 @@ class Lab:
     def _work_order(self, oid: str, o: Mapping[str, Any], minutes: float, *, role: str = "",
                     params: Mapping[str, Any] | None = None) -> WorkOrder:
         role = role or o["role"]
-        executor = self.tiers[ROLES[role].tier]
+        executor = self.tiers[self._tier(role, o)]
         if executor in self.kernel.unavailable():
             executor = self.kernel.fallback_for(executor) or executor
         return WorkOrder(oid, role, executor, o["goal"], tuple(o["deliverables"]),
                          o["acceptance"], Limits(int(minutes * 60)), inputs=tuple(o["inputs"]),
                          params=dict(params or {}))
+
+    def _tier(self, role: str, o: Mapping[str, Any]) -> str:
+        """A reviewer tagged "interim" runs one tier lower, unless it reviews the topic
+        (before the user approved one) or the final paper."""
+        tier = ROLES[role].tier
+        if role != "reviewer" or o.get("review") != "interim":
+            return tier
+        if any(m in d for d in o["deliverables"] for m in ("topic_", "final_review")):
+            return tier
+        charter = self.charter()
+        if charter and "topic" in charter.approval_points and not self._topic_approved():
+            return tier
+        return INTERIM_REVIEW_TIER
+
+    def _topic_approved(self) -> bool:
+        replied = {e.payload["qid"] for e in self._events("user.reply")}
+        return any(e.payload.get("point") == "topic" and e.payload.get("qid") in replied
+                   for e in self._events("user.question"))
 
     def _submit_engine(self, oid: str, o: Mapping[str, Any], minutes: float) -> None:
         """An AI-Scientist-v3 investigation on a task directory an engineer prepared."""

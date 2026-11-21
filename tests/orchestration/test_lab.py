@@ -682,3 +682,85 @@ def test_main_agent_switches_to_fallback_when_out_of_quota(tmp_path: Path) -> No
                                                             Usage(10, 0, 2)), strict=True)]
     assert spend.usd == pytest.approx(sum(x or 0.0 for x in expected))
     assert all(expected)  # each call priced at its own model's rate
+
+
+@dataclass
+class DispatchModel(FakeModel):
+    name: str = "codex"
+    model: str = "gpt-6.1-sol"
+
+    def ask(self, prompt: str, schema: dict[str, Any], *, cwd: Path, log_dir: Path,
+            timeout: float = 900) -> tuple[dict[str, Any], Usage]:
+        from tar_lab.agents.main_agent import DISPATCH_SCHEMA
+
+        assert schema is DISPATCH_SCHEMA and "You are the dispatcher" in prompt
+        self.prompts.append(prompt)
+        return {"escalate": "", **self.decisions.pop(0)}, Usage(4, 0, 1)
+
+
+def make_split_lab(tmp_path: Path, main: FakeModel, dispatcher: DispatchModel,
+                   results: list[WorkResult]) -> Lab:
+    project = Project(tmp_path / "proj")
+    project.init()
+    executor = FakeExecutor(results)
+
+    class Notes:
+        def notify(self, subject: str, body: str) -> None:
+            pass
+
+    lab = Lab(Kernel(project, Ledger(project.ledger_path), {"fake": executor}),
+              MainAgent(main, project.root), Notes(),
+              {"high": "fake", "medium": "fake", "low": "fake"}, threaded=False,
+              dispatcher=MainAgent(dispatcher, project.root))
+    lab.start("idea", ask=lambda q: "", confirm=lambda c: True)
+    return lab
+
+
+def _deciders(lab: Lab) -> list[tuple[str, str]]:
+    return [(e.payload["agent"], e.payload["route"]) for e in lab._events("pi.decision")]
+
+
+def test_routine_wakeups_go_to_the_dispatcher(tmp_path: Path) -> None:
+    main = FakeModel([decision([order("researcher")]), decision()])
+    dispatcher = DispatchModel([decision([order("designer")], message="survey done")])
+    lab = make_split_lab(tmp_path, main, dispatcher,
+                         [WorkResult("done", "ok"), WorkResult("done", "ok")])
+    for _ in range(5):  # plan, survey, dispatcher step, design, main step
+        lab.step()
+    assert _deciders(lab) == [("main", "first plan"), ("dispatcher", "routine orders finished"),
+                              ("main", "designer order finished")]
+    assert [e.payload["text"] for e in lab._events("pi.message")] == ["survey done"]
+
+
+@pytest.mark.parametrize(("reply", "reason"), [
+    (decision(ask=[APPROVAL]), "asks the user"),
+    (decision(finish=True), "proposes to finish"),
+    ({**decision([order("engineer")]), "escalate": "arms may be identical"},
+     "arms may be identical"),
+])
+def test_dispatcher_escalates_to_the_main_agent(tmp_path: Path, reply: dict[str, Any],
+                                                reason: str) -> None:
+    main = FakeModel([decision([order("researcher")]), decision(message="main took it")])
+    lab = make_split_lab(tmp_path, main, DispatchModel([reply]), [WorkResult("done", "ok")])
+    for _ in range(3):
+        lab.step()
+    (esc,) = lab._events("pi.escalated")
+    assert esc.payload["reason"] == reason and esc.payload["model"] == "gpt-6.1-sol"
+    assert _deciders(lab)[-1] == ("main", "routine orders finished")
+    assert not lab.questions() and len(lab.ledger.orders()) == 1  # nothing of it applied
+    assert [e.payload["text"] for e in lab._events("pi.message")] == ["main took it"]
+
+
+def test_interim_reviews_run_one_tier_lower(tmp_path: Path) -> None:
+    lab, _ = make_lab(tmp_path, FakeModel())
+    review = {**order("reviewer"), "review": "interim"}
+    assert lab._tier("reviewer", review) == "high"  # topic not approved yet
+    lab.ledger.append("user.question", None, {"qid": "q1", "point": "topic", "kind": "approval",
+                                              "text": "t", "options": [], "default": ""})
+    lab.ledger.append("user.reply", None, {"qid": "q1", "answer": "A", "auto": False})
+    assert lab._tier("reviewer", review) == "medium"
+    assert lab._tier("reviewer", {**review, "deliverables": ["reports/final_review.md"]}) == \
+        "high"
+    assert lab._tier("reviewer", {**review, "review": "final"}) == "high"
+    assert lab._tier("reviewer", {**review, "review": "none"}) == "high"
+    assert lab._tier("designer", {**order("designer"), "review": "interim"}) == "high"

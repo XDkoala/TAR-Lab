@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from .ledger import Event, OrderState
 from .workorder import Usage
 
-MAIN_AGENT_USAGE = frozenset({"pi.decision", "intake.answers", "project.charter"})
+MAIN_AGENT_USAGE = frozenset({"pi.decision", "pi.escalated", "intake.answers",
+                              "project.charter"})
 
 # US dollars per million tokens: (uncached input, cached input, output).
 # Source: https://developers.openai.com/api/docs/models/gpt-6.1-sol (checked 2026-11-17).

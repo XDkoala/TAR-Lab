@@ -89,7 +89,7 @@
 | 写作 | 报告与论文 | 中 |
 | 审稿人 | 按目标会议标准打分；与调研员一起判断课题价值（选题审稿 + 终审，§6） | 高 |
 
-难度档与模型的对应关系写在配置里：第零版所有档位指向 Codex `gpt-6.1-sol` / `medium`（§13、§14）；第一版高难档（designer、reviewer）指向 Devin `claude-opus-5-5-medium`（§12；已实现，`TARLAB_TIERS` 可改），其余档位仍用 Codex。主 Agent 负责与用户沟通和全程决策，提问和理解需求的能力最关键，默认也用 Devin（`TARLAB_MAIN` 可改）。额度耗尽或模型不可用时，内核按配置切换备用模型（默认 Devin 用完转 Codex）或暂停并通知用户。
+难度档与模型的对应关系写在配置里：第零版所有档位指向 Codex `gpt-6.1-sol` / `medium`（§13、§14）；第一版高难档（designer、reviewer）指向 Devin `claude-opus-5-5-medium`（§12；已实现，`TARLAB_TIERS` 可改），其余档位仍用 Codex。主 Agent 负责与用户沟通和全程决策，提问和理解需求的能力最关键，默认也用 Devin（`TARLAB_MAIN` 可改）。主 Agent 拆成两个：例行唤醒（调研、工程、写作工单正常完成）由调度助理（Codex，`TARLAB_DISPATCHER`）决定下一步，它不得与用户沟通、改立项书、取消工单、派最终评估或结束项目，越界或主动上报时改由主 Agent 重新决策；其余唤醒都归主 Agent。审稿按 `review` 分级：选题审稿和终审在高难档，中途审稿降到中档。额度耗尽或模型不可用时，内核按配置切换备用模型（默认 Devin 用完转 Codex）或暂停并通知用户。
 
 ### 执行者（`integrations`）
 

@@ -29,12 +29,15 @@ _STRS = {"type": "array", "items": _STR}
 
 QUESTION_SCHEMA = _obj({"key": _STR, "text": _STR, "options": _STRS, "default": _STR})
 INTAKE_SCHEMA = _obj({"questions": {"type": "array", "items": QUESTION_SCHEMA}})
+# Reviewer orders: topic and final reviews run on the high tier, interim ones on the medium.
+REVIEW_KINDS = ("topic", "interim", "final")
 ORDER_SCHEMA = _obj({
     "role": {"type": "string", "enum": sorted(ROLES)},
     "goal": _STR, "deliverables": _STRS, "acceptance": _STR,
     "minutes": {"type": "number"}, "inputs": _STRS,
     "kind": {"type": "string", "enum": ["work", "engine", "final_eval"]},
     "task_dir": _STR,
+    "review": {"type": "string", "enum": ["none", *REVIEW_KINDS]},
 })
 ASK_SCHEMA = _obj({"kind": {"type": "string", "enum": ["question", "approval"]},
                    "point": {"type": "string", "enum": ["none", *APPROVAL_POINTS]},
@@ -54,6 +57,8 @@ DECISION_SCHEMA = _obj({
     "finish": {"type": "boolean"},
     "final_summary": _STR,
 })
+# The dispatcher's answer: a decision plus why the main agent must take over ("" if not).
+DISPATCH_SCHEMA = _obj({**DECISION_SCHEMA["properties"], "escalate": _STR})
 
 PI_BRIEF = """\
 You are the main agent (principal investigator) of a TAR-Lab research project. You never do
@@ -84,7 +89,11 @@ Rules:
   what the user approves when "topic" is an approval point), code and `results/`,
   `reports/analysis.md`, `paper/main.pdf`, and `reports/final_review.md`.
 - Review happens twice: a topic review right after the candidates, and a final review of
-  the paper. Act on major review issues before finishing, within the remaining time.
+  the paper. Act on major review issues before finishing, within the remaining time. Tag
+  every reviewer order with `review`: "topic" (candidates and topic report), "final" (the
+  paper and `reports/final_review.md`), or "interim" for anything in between (experiment
+  designs, intermediate results, drafts), which runs on a cheaper model. Other roles take
+  "none".
 - Before asking for topic approval, dispatch a design check for the recommended candidate:
   an engineer order (at most 15 minutes, no training, no downloads over 1 GB) that shows on
   real or estimated numbers that the compared arms actually run different things. It is part
@@ -136,6 +145,17 @@ Roles you can dispatch:
 """
 
 
+DISPATCHER_NOTE = """\
+You are the dispatcher: the main agent's assistant for routine steps, using the same rules.
+The platform judged this wake-up routine (work orders finished normally). Carry on with the
+current plan: dispatch the orders it calls for next, or wait. `message_to_user` may hold a
+short progress note. You may not ask the user, change the charter, cancel orders, dispatch a
+final evaluation, or finish. If the step needs any of that, or needs judgement (results that
+look wrong or surprising or change the plan, compared arms that may not differ, anything you
+are unsure about), set `escalate` to the reason in one sentence and leave the rest empty; the
+main agent then decides. Otherwise set `escalate` to an empty string."""
+
+
 def _roles() -> str:
     return "\n".join(f"- {r.name}: {r.brief}" for r in ROLES.values())
 
@@ -158,13 +178,14 @@ class Decision:
     message_to_user: str = ""
     cancel_orders: tuple[str, ...] = ()
     charter_changes: tuple[dict[str, str], ...] = ()
+    escalate: str = ""  # dispatcher only
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Decision:
         return cls(data["rationale"], tuple(data["orders"]), tuple(data["ask_user"]),
                    bool(data["finish"]), data["final_summary"],
                    data.get("message_to_user", ""), tuple(data.get("cancel_orders", ())),
-                   tuple(data.get("charter_changes", ())))
+                   tuple(data.get("charter_changes", ())), data.get("escalate", ""))
 
     def to_dict(self) -> dict[str, Any]:
         return {"rationale": self.rationale, "message_to_user": self.message_to_user,
@@ -234,9 +255,11 @@ pauses the project."""
         data, usage = self.model.ask(prompt, CHARTER_SCHEMA, cwd=self.root, log_dir=log_dir)
         return Charter.from_dict({**data, "idea": idea}), usage
 
-    def decide(self, context: str, log_dir: Path) -> tuple[Decision, Usage]:
+    def decide(self, context: str, log_dir: Path, *,
+               dispatcher: bool = False) -> tuple[Decision, Usage]:
+        note = f"\n\n{DISPATCHER_NOTE}" if dispatcher else ""
         prompt = f"""\
-{self._brief()}
+{self._brief()}{note}
 
 Project state (from the ledger):
 {context}
@@ -244,7 +267,8 @@ Project state (from the ledger):
 Decide the next step. Dispatch only orders that can start now; leave dependent work for a
 later wake-up. Set `finish` only when the deliverables are in place or you propose to stop;
 then write `final_summary` for the user, who must confirm."""
-        data, usage = self.model.ask(prompt, DECISION_SCHEMA, cwd=self.root, log_dir=log_dir)
+        schema = DISPATCH_SCHEMA if dispatcher else DECISION_SCHEMA
+        data, usage = self.model.ask(prompt, schema, cwd=self.root, log_dir=log_dir)
         return Decision.from_dict(data), usage
 
 
