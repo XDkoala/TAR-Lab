@@ -4,17 +4,25 @@ The final evaluation is fixed before it runs: everything under ``eval/final/`` (
 script, held-out split definition) and every path listed in ``eval/final/frozen.txt`` (the
 code, configs and checkpoints being evaluated) is hashed when the final-evaluation order is
 dispatched, and hashed again when it ends. Any change in between is reported, not hidden.
+
+Sealing also needs a dry run (``eval/final/dry_run.json``): the protocol run end to end on
+development data, on every split or environment and through the analysis, recorded against
+the exact files being sealed. Bugs in the evaluation itself (a hard-coded constant that only
+fits one environment, an analysis that cannot serialise its output) then surface before the
+held-out data is spent, not after.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
 FINAL_DIR = "eval/final"
 PROTOCOL = f"{FINAL_DIR}/protocol.md"
 FROZEN = f"{FINAL_DIR}/frozen.txt"
+DRY_RUN = f"{FINAL_DIR}/dry_run.json"
 RESULTS_DIR = "results/final"
 SKIP_DIRS = frozenset({".git", ".venv", "venv", ".cache", "__pycache__", "node_modules",
                        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".ipynb_checkpoints"})
@@ -45,6 +53,57 @@ def problems(workspace: Path) -> list[str]:
             found.append(f"`{entry}` in `{FROZEN}` is outside the workspace")
         elif not target.exists():
             found.append(f"`{entry}` in `{FROZEN}` does not exist")
+    return found + dry_run_problems(workspace)
+
+
+def _dry_run_scope(workspace: Path) -> list[str]:
+    """Files the dry run must have been made with: all of ``eval/final/`` but its record."""
+    return [rel for rel in _files(workspace, FINAL_DIR) if rel != DRY_RUN]
+
+
+def stamp_dry_run(workspace: Path) -> None:
+    """Record the current hashes of ``eval/final/`` in the dry-run record."""
+    path = workspace / DRY_RUN
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["files"] = fingerprint(workspace, _dry_run_scope(workspace))
+    path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def dry_run_problems(workspace: Path) -> list[str]:
+    path = workspace / DRY_RUN
+    if not path.is_file():
+        return [(f"`{DRY_RUN}` is missing: run the protocol end to end on development data "
+                "first, on every split or environment and through the analysis (see the "
+                "engineer guide)")]
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"`{DRY_RUN}` is not valid JSON: {exc}"]
+    if not isinstance(record, dict):
+        return [f"`{DRY_RUN}` must be a JSON object"]
+    found = []
+    runs = record.get("runs")
+    if not isinstance(runs, list) or not runs:
+        found.append(f"`{DRY_RUN}` lists no `runs` (one per split or environment)")
+    else:
+        failed = [str(r.get("name", i)) for i, r in enumerate(runs)
+                  if not isinstance(r, dict) or r.get("ok") is not True]
+        if failed:
+            found.append(f"dry runs did not pass: {', '.join(failed)}")
+    analysis = record.get("analysis")
+    if not isinstance(analysis, dict) or analysis.get("ok") is not True:
+        found.append(f"`{DRY_RUN}` has no passing `analysis` run")
+    files = record.get("files")
+    if not isinstance(files, dict):
+        found.append(f"`{DRY_RUN}` records no file hashes; run `tarlab final stamp`")
+    else:
+        current = fingerprint(workspace, _dry_run_scope(workspace))
+        stale = sorted(rel for rel in set(current) | set(files)
+                       if current.get(rel) != files.get(rel))
+        if stale:
+            found.append("the dry run predates changes to "
+                         + ", ".join(f"`{rel}`" for rel in stale[:10])
+                         + "; dry-run again and stamp it")
     return found
 
 
@@ -82,6 +141,17 @@ def fingerprint(workspace: Path, files: list[str] | None = None) -> dict[str, st
     """SHA-256 per file (``None`` for a file that is gone)."""
     return {rel: _sha256(workspace / rel)
             for rel in (sealed_files(workspace) if files is None else files)}
+
+
+def change_kinds(before: dict[str, str | None], workspace: Path) -> dict[str, list[str]]:
+    """``changes`` split into files ``added``, ``modified`` and ``removed`` since sealing."""
+    kinds: dict[str, list[str]] = {"added": [], "modified": [], "removed": []}
+    after = fingerprint(workspace, changes(before, workspace))
+    for rel, digest in after.items():
+        kind = ("added" if before.get(rel) is None else
+                "removed" if digest is None else "modified")
+        kinds[kind].append(rel)
+    return kinds
 
 
 def changes(before: dict[str, str | None], workspace: Path) -> list[str]:

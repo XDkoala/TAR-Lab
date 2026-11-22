@@ -109,6 +109,20 @@ GUIDES: dict[str, str] = {
   `eval/final/`, and `eval/final/frozen.txt` (one workspace path per line: the code, configs
   and checkpoints being evaluated). Do not run it: a separate sealed order does. Until then,
   never load the held-out data.
+- The protocol takes its output directory as an argument (the sealed order passes
+  `results/final/<order id>/`) and needs nothing created or changed under `eval/final/` when
+  it runs: no authorisation, lock or state files there, since any new file in it is reported
+  as a change to the seal.
+- Dry run before sealing (the platform refuses to seal without it): run the exact protocol
+  end to end on development data, writing to `results/dry_run/`: every split or
+  environment it will evaluate, then the analysis on those outputs. Check that
+  environment-specific constants (positions, lengths, IDs) are read from each environment
+  rather than hard-coded, that every metric is finite or handled, and that the analysis
+  writes its output. Record it in `eval/final/dry_run.json` as `{{"runs": [{{"name": ...,
+  "command": ..., "ok": true, "checks": [...]}}], "analysis": {{"command": ..., "ok": true}}}}`,
+  then run `{sys.executable} -m tar_lab.cli final stamp`, which records the hashes of
+  `eval/final/` and says what still blocks sealing. Any later edit to `eval/final/` needs
+  a new dry run and stamp.
 {_EVIDENCE}""",
     "analyst": f"""\
 - Read `results/`; compute mean and spread (std or 95% CI) over seeds; test whether
@@ -134,6 +148,10 @@ GUIDES: dict[str, str] = {
   the venue's `SOURCE.md` give the page limit and anonymity rules); if the venue is
   absent, download the official template from the venue's own site and record its URL in
   `paper/SOURCE.md`.
+- Related work covers the closest prior work found by the survey and novelty search, the
+  standard methods and baselines of the area (e.g. the main model families the paper
+  compares with or builds on), and the evaluation setting; a workshop paper usually cites
+  15-40 works, a full paper more. Cite what the argument needs, not padding.
 - Every number in the paper must come from `results/` or `reports/analysis.md`; keep
   `paper/claims.md` mapping each claim to its source file. Use only citations from the
   survey reports and verify each one with the literature tools. Figures and tables of results
@@ -177,10 +195,15 @@ GUIDES: dict[str, str] = {
   is rejected however careful its statistics are. Then rate novelty, value to the field,
   feasibility within the charter, and risk (1-10 each), check the closest prior work
   yourself (run a deep search on it if none has been run for this candidate), and recommend one candidate or none. Write `reports/topic_review.md`.
+- Interim review (experiment designs, intermediate results, drafts): list only issues that
+  block the next step, at most five, each with the concrete change that resolves it; do not
+  add arms, metrics or experiments unless the design is invalid without them. Say plainly
+  when it can be frozen as it is.
 - Paper review: review as a reviewer for the charter's target venue: summary, strengths,
   weaknesses, major and minor issues, questions, and an overall score (1-10) with the
   venue's usual meaning. Check that numbers match `results/`, that headline
-  numbers come from the sealed final evaluation (`results/final/`), and that citations exist.
+  numbers come from the sealed final evaluation (`results/final/`), that citations exist,
+  and that related work covers the closest prior work and the standard baselines.
   Run `{sys.executable} -m tar_lab.cli tex check paper` (with the venue's `--page-limit` and
   `--anonymous` if it is double-blind) and include its result in the review. Run
   `{sys.executable} -m tar_lab.cli tex render paper`, look at every page image in

@@ -705,9 +705,11 @@ class Lab:
         executor = self.tiers[self._tier(role, o)]
         if executor in self.kernel.unavailable():
             executor = self.kernel.fallback_for(executor) or executor
+        review = o.get("review", "none") if role == "reviewer" else "none"
+        extra = {"review": review} if review != "none" else {}
         return WorkOrder(oid, role, executor, o["goal"], tuple(o["deliverables"]),
                          o["acceptance"], Limits(int(minutes * 60)), inputs=tuple(o["inputs"]),
-                         params=dict(params or {}))
+                         params={**extra, **(params or {})})
 
     def _tier(self, role: str, o: Mapping[str, Any]) -> str:
         """A reviewer tagged "interim" runs one tier lower, unless it reviews the topic
@@ -821,11 +823,12 @@ class Lab:
             st = orders.get(e.order_id or "")
             if e.seq in verified or st is None or not st.terminal:
                 continue
-            changed = seal.changes(e.payload["files"], ws)
+            kinds = seal.change_kinds(e.payload["files"], ws)
+            changed = sorted(f for files in kinds.values() for f in files)
             record = {"order_id": e.order_id, "order_status": st.status,
                       "final_evaluation_number": n, "rerun": e.payload["rerun"],
                       "sealed_at": e.ts.isoformat(), "verified_at": self.clock().isoformat(),
-                      "sealed_files": len(e.payload["files"]), "changed": changed}
+                      "sealed_files": len(e.payload["files"]), "changed": changed, **kinds}
             self.ledger.append("eval.verified", e.order_id, {"seal_seq": e.seq, **record})
             out = ws / seal.RESULTS_DIR / str(e.order_id)
             out.mkdir(parents=True, exist_ok=True)
@@ -839,7 +842,9 @@ class Lab:
                     pick(charter.chat_language,
                          f"工单 {e.order_id} 运行期间，下列封存文件被改动，结果需要披露：\n",
                          f"These sealed files changed while order {e.order_id} ran; the "
-                         "results must say so:\n") + "\n".join(changed[:50]))
+                         "results must say so:\n")
+                    + "\n".join(f"{kind}: {f}" for kind, files in kinds.items()
+                                for f in files[:50]))
 
     def _finish_confirmed(self, seq: int, decision: Decision, charter: Charter) -> bool:
         """Ask once per finishing decision; only an explicit yes (or a timeout default that
@@ -1010,6 +1015,16 @@ class Lab:
         if held:
             lines.append("## Questions held back by the platform (fix, then ask again)")
             lines += [f"- {e.payload['qid']}: {p}" for e in held for p in e.payload["problems"]]
+        orders = self.ledger.orders().values()
+        designs = [s for s in orders if s.order.role == "designer"]
+        interim = [s for s in orders if s.order.role == "reviewer"
+                   and s.order.params.get("review") == "interim"]
+        if designs or interim:
+            minutes = sum(s.used_seconds for s in [*designs, *interim]) / 60
+            lines += ["## Design rounds",
+                      (f"{len(designs)} designer order(s) and {len(interim)} interim review(s) "
+                       f"so far, {minutes:.0f} min in all. At most two review-and-revise "
+                       "rounds per plan; then freeze it or change direction.")]
         sealed = self._events("eval.sealed")
         if sealed:
             checks = {e.payload["seal_seq"]: e.payload for e in self._events("eval.verified")}

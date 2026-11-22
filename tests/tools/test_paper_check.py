@@ -194,3 +194,11 @@ def test_real_check(tmp_path: Path) -> None:
     assert report.ok, report.render()
     statuses = {c.name: c.status for c in report.checks}
     assert statuses["build"] == statuses["citations/refs"] == statuses["bibliography"] == "PASS"
+
+
+def test_citation_count_floor_depends_on_length() -> None:
+    assert pc.citation_count_check(7, 9).status == pc.WARN
+    assert "only 7 works cited (floor 15" in pc.citation_count_check(7, 9).summary
+    assert pc.citation_count_check(9, 4).status == pc.PASS
+    assert pc.citation_count_check(7, 9, minimum=5).status == pc.PASS
+    assert pc.citation_count_check(0, None).status == pc.WARN

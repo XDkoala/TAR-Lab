@@ -574,6 +574,15 @@ class TamperingExecutor(FakeExecutor):
         return super().run(attempt, emit)
 
 
+def passing_dry_run(ws: Path) -> None:
+    from tar_lab.core import seal
+
+    (ws / seal.DRY_RUN).write_text(json.dumps({
+        "runs": [{"name": "S11 dev", "command": "python eval.py --dev", "ok": True}],
+        "analysis": {"command": "python eval.py --analyze", "ok": True}}))
+    seal.stamp_dry_run(ws)
+
+
 def test_final_evaluation_is_sealed_checked_and_rerun_only_with_approval(tmp_path: Path) -> None:
     ex = TamperingExecutor([WorkResult("done", "final: 0.71", session_id="s")] * 2,
                            tamper=[True, False])
@@ -592,15 +601,21 @@ def test_final_evaluation_is_sealed_checked_and_rerun_only_with_approval(tmp_pat
     (ws / "eval" / "final" / "frozen.txt").write_text("code  # the method\n")
     (ws / "code").mkdir()
     (ws / "code" / "model.py").write_text("tuned = False\n")
+    from tar_lab.core import seal
+
+    assert [p for p in seal.problems(ws) if "dry_run.json` is missing" in p]
+    passing_dry_run(ws)
     lab.say("eval ready")
     steps_until(lab, lambda: bool(lab.questions()))  # sealed, ran, verified, rerun asked
     [sealed] = lab._events("eval.sealed")
     assert set(sealed.payload["files"]) == {"code/model.py", "eval/final/eval.py",
-                                            "eval/final/frozen.txt", "eval/final/protocol.md"}
+                                            "eval/final/frozen.txt", "eval/final/protocol.md",
+                                            "eval/final/dry_run.json"}
     oid = sealed.order_id
     assert oid is not None and lab.ledger.orders()[oid].order.params == {"final_eval": True}
     [check] = lab._events("eval.verified")
-    assert check.payload["changed"] == ["code/model.py"]
+    assert check.payload["changed"] == check.payload["modified"] == ["code/model.py"]
+    assert check.payload["added"] == check.payload["removed"] == []
     assert any("封存被改动" in s for s in sent)
     record = json.loads((ws / "results" / "final" / oid / "SEAL.json").read_text())
     assert record["changed"] == ["code/model.py"] and record["final_evaluation_number"] == 1
@@ -626,6 +641,7 @@ def test_declined_rerun_rejects_the_order(tmp_path: Path) -> None:
     (ws / "eval" / "final").mkdir(parents=True)
     (ws / "eval" / "final" / "protocol.md").write_text("Run it once.\n")
     (ws / "eval" / "final" / "frozen.txt").write_text("eval/final\n")
+    passing_dry_run(ws)
     steps_until(lab, lambda: bool(lab.questions()))
     [(qid, q)] = lab.questions().items()
     lab.reply(qid, "不允许重跑")
@@ -764,3 +780,53 @@ def test_interim_reviews_run_one_tier_lower(tmp_path: Path) -> None:
     assert lab._tier("reviewer", {**review, "review": "final"}) == "high"
     assert lab._tier("reviewer", {**review, "review": "none"}) == "high"
     assert lab._tier("designer", {**order("designer"), "review": "interim"}) == "high"
+
+
+def test_dry_run_must_pass_and_match_the_sealed_files(tmp_path: Path) -> None:
+    from tar_lab.core import seal
+
+    ws = tmp_path
+    (ws / "eval" / "final").mkdir(parents=True)
+    (ws / "eval" / "final" / "protocol.md").write_text("Run it once.\n")
+    (ws / "eval" / "final" / "frozen.txt").write_text("eval/final\n")
+    assert any("dry_run.json` is missing" in p for p in seal.problems(ws))
+    (ws / seal.DRY_RUN).write_text(json.dumps({
+        "runs": [{"name": "S11", "ok": True}, {"name": "S13", "ok": False}],
+        "analysis": {"ok": False}}))
+    found = seal.problems(ws)
+    assert "dry runs did not pass: S13" in found and any("no passing `analysis`" in p
+                                                          for p in found)
+    assert any("tarlab final stamp" in p for p in found)
+    passing_dry_run(ws)
+    assert seal.problems(ws) == []
+    (ws / "eval" / "final" / "protocol.md").write_text("Run it twice.\n")
+    (ws / "eval" / "final" / "state.json").write_text("{}")
+    [stale] = seal.problems(ws)
+    assert "`eval/final/protocol.md`" in stale and "`eval/final/state.json`" in stale
+
+
+def test_seal_changes_are_classified(tmp_path: Path) -> None:
+    from tar_lab.core import seal
+
+    (tmp_path / "eval" / "final").mkdir(parents=True)
+    for name in ("protocol.md", "run.py", "old.txt"):
+        (tmp_path / "eval" / "final" / name).write_text(name)
+    (tmp_path / "eval" / "final" / "frozen.txt").write_text("eval/final\n")
+    before = seal.fingerprint(tmp_path)
+    (tmp_path / "eval" / "final" / "run.py").write_text("changed")
+    (tmp_path / "eval" / "final" / "old.txt").unlink()
+    (tmp_path / "eval" / "final" / "sealed-order.json").write_text("{}")
+    assert seal.change_kinds(before, tmp_path) == {
+        "added": ["eval/final/sealed-order.json"], "modified": ["eval/final/run.py"],
+        "removed": ["eval/final/old.txt"]}
+
+
+def test_design_rounds_are_counted_and_review_kind_recorded(tmp_path: Path) -> None:
+    interim = {**order("reviewer"), "review": "interim"}
+    model = FakeModel([decision([order("designer"), interim]), decision()])
+    lab, _ = make_lab(tmp_path, model, [WorkResult("done", "d"), WorkResult("done", "r")])
+    for _ in range(4):
+        lab.step()
+    params = [s.order.params for s in lab.ledger.orders().values()]
+    assert params == [{}, {"review": "interim"}]
+    assert "1 designer order(s) and 1 interim review(s)" in model.prompts[-1]

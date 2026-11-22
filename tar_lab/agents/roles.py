@@ -113,7 +113,8 @@ def render_prompt(order: WorkOrder, *, resume: bool = False,
             f"in `{seal.FROZEN}` were fingerprinted when this order was dispatched and are "
             f"checked again when it ends. Follow `{seal.PROTOCOL}` exactly, once. Do not edit "
             "anything sealed, and do not tune, select or rerun to improve numbers. Write all "
-            f"outputs to `{seal.RESULTS_DIR}/{order.id}/`. If the protocol cannot run as "
+            f"outputs to `{seal.RESULTS_DIR}/{order.id}/` and create nothing under "
+            f"`{seal.FINAL_DIR}/`. If the protocol cannot run as "
             "written, stop and report `needs_help` instead of changing it. Report every number "
             "it produced, including bad ones.")]
     if order.require_sources:

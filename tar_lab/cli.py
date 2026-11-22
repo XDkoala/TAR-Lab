@@ -585,6 +585,15 @@ def build_parser() -> argparse.ArgumentParser:
                             ("pause", "pause after the current work order"),
                             ("stop", "stop the running work order now and pause")):
         groups.add_parser(name, help=help_text).add_argument("project", type=Path)
+    final = groups.add_parser(
+        "final", help="sealed final evaluation: readiness check and dry-run stamp"
+    ).add_subparsers(dest="command", required=True)
+    for name, help_text in (
+            ("check", "say what still blocks sealing eval/final/ (exit 1 if anything)"),
+            ("stamp", ("record the current eval/final/ hashes in eval/final/dry_run.json, "
+                      "then check"))):
+        final.add_parser(name, help=help_text).add_argument(
+            "workspace", type=Path, nargs="?", default=Path("."))
     tex = groups.add_parser(
         "tex", help="LaTeX builds (local TeX Live latexmk/pdflatex; Tectonic as fallback)"
     ).add_subparsers(dest="command", required=True)
@@ -598,6 +607,9 @@ def build_parser() -> argparse.ArgumentParser:
     tex_check.add_argument("--main", default="main.tex")
     tex_check.add_argument("--page-limit", type=int, default=None,
                            help="maximum pages including references")
+    tex_check.add_argument("--min-citations", type=int, default=None,
+                           help="warn below this many cited works (default 15 for 6+ pages, "
+                           "else 8)")
     tex_check.add_argument("--anonymous", action="store_true",
                            help="flag author names, emails, GitHub links, acknowledgements")
     tex_check.add_argument("--workspace", type=Path, default=None,
@@ -738,12 +750,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                       f"{100 - q['used_percent']:g}% left"
                       + (f", resets in {q['resets_in']}" if q["resets_in"] else ""))
         return 0 if quota else 1
+    if args.group == "final":
+        from .core import seal
+
+        if args.command == "stamp":
+            if not (args.workspace / seal.DRY_RUN).is_file():
+                print(f"{seal.DRY_RUN} is missing; write it first (see the engineer guide).",
+                      file=sys.stderr)
+                return 1
+            seal.stamp_dry_run(args.workspace)
+        problems = seal.problems(args.workspace)
+        print("\n".join(f"- {p}" for p in problems) if problems else "Ready to seal.")
+        return 1 if problems else 0
     if args.group == "tex":
         if args.command == "check":
             from .tools.paper_check import check_paper
 
             report = check_paper(args.paper_dir, args.main, args.page_limit, args.anonymous,
-                                 workspace=args.workspace, arxiv=args.arxiv)
+                                 workspace=args.workspace, arxiv=args.arxiv,
+                                 min_citations=args.min_citations)
             if args.json:
                 _print_json(report.to_dict())
             else:

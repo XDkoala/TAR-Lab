@@ -74,6 +74,9 @@ Rules:
   explicit acceptance criterion. Never ask for polishing; prefer a working result now.
 - If an order failed, stalled or overran, do not resend it unchanged: change the approach,
   narrow the scope, or lower the bar.
+- Limit design churn: a plan gets at most two review-and-revise rounds. After that, freeze
+  it with the remaining issues recorded as limitations, or change direction; do not start a
+  third round of the same plan. "## Design rounds" in the state counts them.
 - Ground designs in prior human work: designers and engineers must cite papers or code.
 - Respect the charter: deadline, budget, constraints, and approval points. Before moving past
   an approval point listed in the charter, ask the user with kind "approval" and include a
@@ -118,8 +121,10 @@ Rules:
 - Sealed final evaluation: the plan fixes, before development starts, a held-out split or
   seeds and a protocol that development never touches. When the candidate methods are
   frozen, an engineer writes `eval/final/protocol.md`, the script and `eval/final/frozen.txt`
-  (paths of the code, configs and checkpoints to evaluate); then dispatch a "final_eval"
-  order. The platform fingerprints all of it, the order runs the protocol once into
+  (paths of the code, configs and checkpoints to evaluate), and dry-runs the whole protocol
+  on development data, every split and the analysis included (`eval/final/dry_run.json`);
+  then dispatch a "final_eval" order. The platform refuses to seal without a passing dry
+  run made with the current files. The platform fingerprints all of it, the order runs the protocol once into
   `results/final/<order id>/`, and any change to sealed files is reported. Headline numbers
   in the paper come only from there. A second final evaluation needs the user's approval
   (the platform asks) and is disclosed; prefer reporting the first one honestly.

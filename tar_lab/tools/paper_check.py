@@ -331,6 +331,21 @@ def bib_check(paper_dir: Path, tex: str) -> Check:
     return Check("bibliography", status, summary, missing + incomplete)
 
 
+def citation_count_check(cited: int, pages: int | None, minimum: int | None = None) -> Check:
+    """A thin bibliography usually means missing related work or baselines. The default bar
+    is a rough floor for ML venues: 15 works for papers of 6 pages or more, 8 for shorter
+    ones; a warning, since some papers legitimately cite less."""
+    floor = minimum if minimum is not None else 15 if (pages or 0) >= 6 else 8
+    if cited >= floor:
+        return Check("citation count", PASS, f"{cited} works cited (floor {floor})")
+    return Check("citation count", WARN,
+                 f"only {cited} works cited (floor {floor} for a "
+                 f"{pages if pages is not None else '?'}-page paper)",
+                 [("check that related work covers the closest prior work and the standard "
+                  "methods and baselines of the area; set --min-citations if this venue "
+                  "expects fewer")])
+
+
 # --- anonymity ---------------------------------------------------------------------------
 
 
@@ -446,7 +461,8 @@ def copy_sources(src: Path, dst: Path, main: str = "main.tex") -> None:
 def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None = None,
                 anonymous: bool = False, timeout: float = 600,
                 workspace: Path | None = None, arxiv: bool = False,
-                arxiv_out: Path | None = None) -> CheckReport:
+                arxiv_out: Path | None = None,
+                min_citations: int | None = None) -> CheckReport:
     """``workspace`` (default: the paper's parent) holds ``figures/spec.toml``; when it
     exists, generated figures and tables are checked too. ``arxiv`` builds with arXiv's TeX
     Live, then checks the package of files the build read (:mod:`tar_lab.tools.arxiv`),
@@ -514,6 +530,7 @@ def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None 
         else:
             checks.append(Check("latex log", SKIP, f"no {tex_log.name} produced"))
         pdf = result.pdf
+        pages = None
         pdf_text = _run(["pdftotext", "-layout", str(pdf), "-"]) if pdf else None
         if pdf is None:
             checks.append(Check("fonts", SKIP, "no PDF"))
@@ -523,11 +540,12 @@ def check_paper(paper_dir: Path, main: str = "main.tex", page_limit: int | None 
             checks.append(font_check(parse_pdffonts(fonts_out)) if fonts_out is not None
                           else Check("fonts", SKIP, "pdffonts not available or failed"))
             info = _run(["pdfinfo", str(pdf)])
-            checks.append(page_check(parse_pdfinfo_pages(info) if info else None,
-                                     page_limit, pdf_text))
+            pages = parse_pdfinfo_pages(info) if info else None
+            checks.append(page_check(pages, page_limit, pdf_text))
             checks.append(audit.resolution_check(_run(["pdfimages", "-list", str(pdf)])))
         tex = read_sources(work)
         checks.append(bib_check(work, tex))
+        checks.append(citation_count_check(len(set(cite_keys(tex))), pages, min_citations))
         checks.append(audit.handwritten_table_check(work))
         if (workspace / SPEC).is_file():
             checks.append(audit.artifact_check(workspace, paper_dir))
